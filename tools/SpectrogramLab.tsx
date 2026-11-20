@@ -1,9 +1,8 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 
 type HeatmapTheme = 'thermal' | 'magma' | 'mono' | 'emerald' | 'radar';
 
 const NOTE_STRINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-const STORED_BINS = 512;
 
 const freqToNote = (freq: number): { note: string; cents: number } => {
   if (freq < 20 || !isFinite(freq)) return { note: '—', cents: 0 };
@@ -15,10 +14,20 @@ const freqToNote = (freq: number): { note: string; cents: number } => {
   return { note: `${name}${octave}`, cents };
 };
 
+// Blender-style ColorRamp mapping: maps raw [0..1] using Low Stop (Black Point) & High Stop (White Point)
+const applyColorRamp = (raw: number, rampLow: number, rampHigh: number): number => {
+  if (Math.abs(rampHigh - rampLow) < 0.005) {
+    return raw >= rampLow ? 1 : 0;
+  }
+  const t = (raw - rampLow) / (rampHigh - rampLow);
+  return Math.max(0, Math.min(1, t));
+};
+
 const mapHeatmapColor = (val: number, theme: HeatmapTheme): [number, number, number] => {
   const v = Math.max(0, Math.min(1, val));
+  if (v <= 0.001) return [5, 5, 7];
   if (theme === 'mono') {
-    const c = Math.round(Math.pow(v, 1.15) * 255);
+    const c = Math.round(v * 255);
     return [c, c, c];
   }
   if (theme === 'thermal') {
@@ -61,49 +70,69 @@ const mapHeatmapColor = (val: number, theme: HeatmapTheme): [number, number, num
   return [Math.round(t * 240), Math.round(130 + t * 125), Math.round(200 + t * 55)];
 };
 
-// Fast in-place Radix-2 FFT to precompute full-file spectrogram for long audio files
-function computeFullAudioSpectrogram(audioBuffer: AudioBuffer, maxFrames = 3600): Uint8Array[] {
-  const N = 1024; // 512 bins
-  const half = N / 2;
-  const channel = audioBuffer.getChannelData(0);
-  const totalSamples = channel.length;
-  const numFrames = Math.min(maxFrames, Math.max(200, Math.floor(totalSamples / 512)));
-  const hop = Math.max(1, Math.floor((totalSamples - N) / Math.max(1, numFrames - 1)));
+// Precomputed FFT Tables Cache for ultra-fast arbitrary window resampling
+const fftCache = new Map<number, { win: Float32Array; rev: Uint32Array }>();
 
+function getFftTables(N: number) {
+  let cached = fftCache.get(N);
+  if (cached) return cached;
+  const bits = Math.round(Math.log2(N));
   const win = new Float32Array(N);
   for (let i = 0; i < N; i++) {
     win[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
   }
-
-  // Bit-reversal table
   const rev = new Uint32Array(N);
   for (let i = 0; i < N; i++) {
     let j = 0;
-    for (let bit = 0; bit < 10; bit++) {
+    for (let bit = 0; bit < bits; bit++) {
       j = (j << 1) | ((i >> bit) & 1);
     }
     rev[i] = j;
   }
+  cached = { win, rev };
+  fftCache.set(N, cached);
+  return cached;
+}
 
-  const re = new Float32Array(N);
-  const im = new Float32Array(N);
+// High-precision Radix-2 FFT over any time slice [startSec..endSec] of an AudioBuffer
+function computeWindowSpectrogram(
+  audioBuffer: AudioBuffer,
+  startSec: number,
+  endSec: number,
+  numColumns: number,
+  fftN: number
+): Uint8Array[] {
+  const half = fftN >> 1;
+  const channel = audioBuffer.getChannelData(0);
+  const sr = audioBuffer.sampleRate;
+  const totalSamples = channel.length;
+  const startSample = Math.max(0, Math.floor(startSec * sr));
+  const endSample = Math.min(totalSamples, Math.ceil(endSec * sr));
+  const spanSamples = Math.max(fftN, endSample - startSample);
+
+  const { win, rev } = getFftTables(fftN);
+  const re = new Float32Array(fftN);
+  const im = new Float32Array(fftN);
   const frames: Uint8Array[] = [];
 
-  for (let f = 0; f < numFrames; f++) {
-    const start = Math.min(Math.max(0, totalSamples - N), f * hop);
-    for (let i = 0; i < N; i++) {
+  for (let f = 0; f < numColumns; f++) {
+    const ratio = numColumns > 1 ? f / (numColumns - 1) : 0;
+    const centerSample = startSample + Math.floor(ratio * Math.max(0, spanSamples - fftN));
+    const base = Math.min(Math.max(0, totalSamples - fftN), centerSample);
+
+    for (let i = 0; i < fftN; i++) {
       const idx = rev[i];
-      re[i] = (channel[start + idx] || 0) * win[idx];
+      re[i] = (channel[base + idx] || 0) * win[idx];
       im[i] = 0;
     }
 
-    for (let size = 2; size <= N; size <<= 1) {
+    for (let size = 2; size <= fftN; size <<= 1) {
       const halfSize = size >> 1;
       const angle = (-2 * Math.PI) / size;
       const wStepRe = Math.cos(angle);
       const wStepIm = Math.sin(angle);
 
-      for (let i = 0; i < N; i += size) {
+      for (let i = 0; i < fftN; i += size) {
         let wRe = 1;
         let wIm = 0;
         for (let j = 0; j < halfSize; j++) {
@@ -125,7 +154,7 @@ function computeFullAudioSpectrogram(audioBuffer: AudioBuffer, maxFrames = 3600)
     const col = new Uint8Array(half);
     for (let b = 0; b < half; b++) {
       const mag = Math.hypot(re[b], im[b]) / half;
-      const db = 20 * Math.log10(mag + 1e-7); // approx -100..0 dB
+      const db = 20 * Math.log10(mag + 1e-7);
       const norm = Math.max(0, Math.min(1, (db + 88) / 80));
       col[b] = Math.round(norm * 255);
     }
@@ -139,18 +168,23 @@ const SpectrogramLab: React.FC = () => {
   const [isFrozen, setIsFrozen] = useState(false);
   const [theme, setTheme] = useState<HeatmapTheme>('thermal');
   const [logScale, setLogScale] = useState(true);
-  const [fftSize, setFftSize] = useState<number>(2048);
-  const [smoothing, setSmoothing] = useState<number>(0.65);
-  const [gainBoost, setGainBoost] = useState<number>(1.2);
+  const [fftSize, setFftSize] = useState<number>(2048); // 1024, 2048, 4096
+  const [sampleRateSlices, setSampleRateSlices] = useState<number>(920); // columns computed per window (300 to 1840)
+  const [smoothing, setSmoothing] = useState<number>(0.6);
+
+  // Blender-Style Color Ramp (2 Sliders: Black Point / Low Cutoff & White Point / High Ceiling)
+  const [rampLow, setRampLow] = useState<number>(0.12);  // 0.0 to 1.0
+  const [rampHigh, setRampHigh] = useState<number>(0.85); // 0.0 to 1.0
+
   const [fileName, setFileName] = useState<string>('');
   const [fileDuration, setFileDuration] = useState<number>(0);
   const [isFilePlaying, setIsFilePlaying] = useState<boolean>(false);
 
   // Zoom & Pan State (Time Axis X & Frequency Axis Y)
-  const [timeZoom, setTimeZoom] = useState<number>(1);       // 1x to 20x
+  const [timeZoom, setTimeZoom] = useState<number>(1);       // 1x to 40x
   const [timePan, setTimePan] = useState<number>(1);         // 0.0 (start) to 1.0 (end/latest)
   const [autoFollow, setAutoFollow] = useState<boolean>(true);
-  const [freqZoom, setFreqZoom] = useState<number>(1);       // 1x to 10x
+  const [freqZoom, setFreqZoom] = useState<number>(1);       // 1x to 12x
   const [freqPan, setFreqPan] = useState<number>(0);         // 0.0 (low freq) to 1.0 (high freq)
 
   // Live Frequency Telemetry
@@ -170,7 +204,6 @@ const SpectrogramLab: React.FC = () => {
     hz: number;
     note: string;
     timeSec?: number;
-    db?: number;
   } | null>(null);
 
   const waterfallCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -186,13 +219,13 @@ const SpectrogramLab: React.FC = () => {
   const filePauseOffsetRef = useRef<number>(0);
   const synthOscsRef = useRef<OscillatorNode[]>([]);
 
-  // Complete FFT Frame History for Arbitrary Time Zoom & Left/Right Panning
+  // Live stream history (for Mic / Synth) & dynamic high-res window frames (for File mode)
   const historyFramesRef = useRef<Uint8Array[]>([]);
-  const latestSpectrumRef = useRef<Uint8Array>(new Uint8Array(STORED_BINS));
-  const peakHoldRef = useRef<Float32Array>(new Float32Array(STORED_BINS));
+  const fileWindowFramesRef = useRef<Uint8Array[]>([]);
+  const latestSpectrumRef = useRef<Uint8Array>(new Uint8Array(1024));
+  const peakHoldRef = useRef<Float32Array>(new Float32Array(2048));
   const rafRef = useRef<number>(0);
 
-  // Dragging state for panning canvas with mouse
   const panDragRef = useRef<{
     active: boolean;
     target: 'waterfall' | 'spectrum';
@@ -240,7 +273,6 @@ const SpectrogramLab: React.FC = () => {
     return { ctx, analyser: analyserRef.current };
   };
 
-  // Start Live Microphone
   const startMic = async () => {
     stopAllSources();
     try {
@@ -263,25 +295,56 @@ const SpectrogramLab: React.FC = () => {
     }
   };
 
-  const playLoadedAudioFrom = useCallback((offsetSec: number) => {
-    const buf = loadedBufferRef.current;
-    if (!buf) return;
-    stopFilePlaybackNode();
-    const { ctx, analyser } = initAnalyser();
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.loop = true;
-    src.connect(analyser);
-    analyser.connect(ctx.destination);
-    const safeOffset = ((offsetSec % buf.duration) + buf.duration) % buf.duration;
-    src.start(0, safeOffset);
-    fileSourceRef.current = src;
-    fileStartWallRef.current = ctx.currentTime - safeOffset;
-    filePauseOffsetRef.current = safeOffset;
-    setIsFilePlaying(true);
-  }, [fftSize, smoothing]);
+  const playLoadedAudioFrom = useCallback(
+    (offsetSec: number) => {
+      const buf = loadedBufferRef.current;
+      if (!buf) return;
+      stopFilePlaybackNode();
+      const { ctx, analyser } = initAnalyser();
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.loop = true;
+      src.connect(analyser);
+      analyser.connect(ctx.destination);
+      const safeOffset = ((offsetSec % buf.duration) + buf.duration) % buf.duration;
+      src.start(0, safeOffset);
+      fileSourceRef.current = src;
+      fileStartWallRef.current = ctx.currentTime - safeOffset;
+      filePauseOffsetRef.current = safeOffset;
+      setIsFilePlaying(true);
+    },
+    [fftSize, smoothing]
+  );
 
-  // Open Audio File & Immediately Pre-Compute Full Spectrogram History for Left/Right Panning & Zoom
+  // Visible time window calculation
+  const visibleTimeWindow = useMemo(() => {
+    const dur = fileDuration || historyFramesRef.current.length / 60;
+    if (dur <= 0) return { start: 0, end: 0 };
+    const span = dur / timeZoom;
+    const start = timePan * Math.max(0, dur - span);
+    return { start, end: start + span };
+  }, [fileDuration, timeZoom, timePan]);
+
+  // Whenever loaded AudioBuffer, timeZoom, timePan, sampleRateSlices, or fftSize changes,
+  // dynamically resample the exact visible window [start..end] at full sampling precision!
+  useEffect(() => {
+    if (sourceMode !== 'file' || !loadedBufferRef.current) return;
+    const buf = loadedBufferRef.current;
+    const dur = buf.duration;
+    const span = dur / timeZoom;
+    const startSec = timePan * Math.max(0, dur - span);
+    const endSec = startSec + span;
+
+    const computed = computeWindowSpectrogram(
+      buf,
+      startSec,
+      endSec,
+      sampleRateSlices,
+      Math.min(2048, fftSize)
+    );
+    fileWindowFramesRef.current = computed;
+  }, [sourceMode, fileDuration, timeZoom, timePan, sampleRateSlices, fftSize]);
+
   const handleFileUpload = async (file?: File) => {
     if (!file) return;
     stopAllSources();
@@ -292,11 +355,10 @@ const SpectrogramLab: React.FC = () => {
       setFileName(file.name);
       setFileDuration(buf.duration);
 
-      // Compute full-track spectrogram so the user can immediately zoom & pan left/right across the entire file
-      const fullFrames = computeFullAudioSpectrogram(buf, 3600);
-      historyFramesRef.current = fullFrames;
-      if (fullFrames.length > 0) {
-        latestSpectrumRef.current = fullFrames[0];
+      const initialSlices = computeWindowSpectrogram(buf, 0, buf.duration, sampleRateSlices, Math.min(2048, fftSize));
+      fileWindowFramesRef.current = initialSlices;
+      if (initialSlices.length > 0) {
+        latestSpectrumRef.current = initialSlices[0];
       }
       peakHoldRef.current.fill(0);
       setTimeZoom(1);
@@ -308,7 +370,6 @@ const SpectrogramLab: React.FC = () => {
     } catch {}
   };
 
-  // Start Multi-Harmonic Test Signal
   const startTestSignal = () => {
     stopAllSources();
     const { ctx, analyser } = initAnalyser();
@@ -360,18 +421,13 @@ const SpectrogramLab: React.FC = () => {
   };
 
   useEffect(() => {
-    if (analyserRef.current) {
-      analyserRef.current.fftSize = fftSize;
-    }
+    if (analyserRef.current) analyserRef.current.fftSize = fftSize;
   }, [fftSize]);
 
   useEffect(() => {
-    if (analyserRef.current) {
-      analyserRef.current.smoothingTimeConstant = smoothing;
-    }
+    if (analyserRef.current) analyserRef.current.smoothingTimeConstant = smoothing;
   }, [smoothing]);
 
-  // Convert normalized viewport coordinate [0..1] (with freqZoom & freqPan applied) to Hz
   const normToFreq = useCallback(
     (viewNorm: number, sampleRate: number) => {
       const nyquist = sampleRate / 2;
@@ -388,7 +444,6 @@ const SpectrogramLab: React.FC = () => {
     [logScale, freqZoom, freqPan]
   );
 
-  // Convert Y coordinate on waterfall canvas [0..height] to Hz
   const yToFreq = useCallback(
     (y: number, height: number, sampleRate: number) => {
       const viewNorm = 1 - Math.max(0, Math.min(1, y / height));
@@ -397,76 +452,113 @@ const SpectrogramLab: React.FC = () => {
     [normToFreq]
   );
 
-  // Draw Both Waterfall Heatmap & Lower FFT Histogram based on current Zoom & Pan
+  // Draw Waterfall Heatmap & Lower FFT Histogram using Blender ColorRamp & Dynamic Resampled Frames
   const drawCanvases = useCallback(
-    (playheadRatio: number | null) => {
+    (playheadSec: number | null) => {
       const wfCanvas = waterfallCanvasRef.current;
       const spCanvas = spectrumCanvasRef.current;
       if (!wfCanvas || !spCanvas) return;
 
       const wfCtx = wfCanvas.getContext('2d')!;
       const spCtx = spCanvas.getContext('2d')!;
-      const sampleRate = audioCtxRef.current?.sampleRate || 44100;
+      const sampleRate = loadedBufferRef.current?.sampleRate || audioCtxRef.current?.sampleRate || 44100;
       const nyquist = sampleRate / 2;
 
-      const frames = historyFramesRef.current;
-      const totalFrames = frames.length;
-
-      // 1. Render Zoomed & Panned 2D Waterfall Heatmap
       const w = wfCanvas.width;
       const h = wfCanvas.height;
 
-      if (totalFrames === 0) {
-        wfCtx.fillStyle = '#050507';
-        wfCtx.fillRect(0, 0, w, h);
-      } else {
-        const visibleFrames = Math.max(10, totalFrames / timeZoom);
-        const maxStartFrame = Math.max(0, totalFrames - visibleFrames);
-        const startFrame = timePan * maxStartFrame;
-
-        // Precompute frequency bin index for each Y row
-        const rowBins = new Uint16Array(h);
-        for (let y = 0; y < h; y++) {
-          const hz = yToFreq(y, h, sampleRate);
-          rowBins[y] = Math.min(STORED_BINS - 1, Math.max(0, Math.floor((hz / nyquist) * STORED_BINS)));
-        }
-
-        const imgData = wfCtx.createImageData(w, h);
-        const data = imgData.data;
-
-        for (let x = 0; x < w; x++) {
-          const fIdx = Math.min(
-            totalFrames - 1,
-            Math.max(0, Math.floor(startFrame + (x / w) * visibleFrames))
-          );
-          const col = frames[fIdx];
-          if (!col) continue;
-
+      // Determine active frame source
+      if (sourceMode === 'file') {
+        const frames = fileWindowFramesRef.current;
+        const totalCols = frames.length;
+        if (totalCols === 0) {
+          wfCtx.fillStyle = '#050507';
+          wfCtx.fillRect(0, 0, w, h);
+        } else {
+          const binLen = frames[0].length;
+          const rowBins = new Uint16Array(h);
           for (let y = 0; y < h; y++) {
-            const bin = rowBins[y];
-            const rawIntensity = (col[bin] / 255) * gainBoost;
-            const [r, g, b] = mapHeatmapColor(rawIntensity, theme);
-            const pIdx = (y * w + x) * 4;
-            data[pIdx] = r;
-            data[pIdx + 1] = g;
-            data[pIdx + 2] = b;
-            data[pIdx + 3] = 255;
+            const hz = yToFreq(y, h, sampleRate);
+            rowBins[y] = Math.min(binLen - 1, Math.max(0, Math.floor((hz / nyquist) * binLen)));
+          }
+
+          const imgData = wfCtx.createImageData(w, h);
+          const data = imgData.data;
+
+          for (let x = 0; x < w; x++) {
+            const cIdx = Math.min(totalCols - 1, Math.floor((x / w) * totalCols));
+            const col = frames[cIdx];
+            for (let y = 0; y < h; y++) {
+              const rawNorm = col[rowBins[y]] / 255;
+              const ramped = applyColorRamp(rawNorm, rampLow, rampHigh);
+              const [r, g, b] = mapHeatmapColor(ramped, theme);
+              const pIdx = (y * w + x) * 4;
+              data[pIdx] = r;
+              data[pIdx + 1] = g;
+              data[pIdx + 2] = b;
+              data[pIdx + 3] = 255;
+            }
+          }
+          wfCtx.putImageData(imgData, 0, 0);
+
+          if (playheadSec !== null && visibleTimeWindow.end > visibleTimeWindow.start) {
+            if (playheadSec >= visibleTimeWindow.start && playheadSec <= visibleTimeWindow.end) {
+              const px =
+                ((playheadSec - visibleTimeWindow.start) /
+                  (visibleTimeWindow.end - visibleTimeWindow.start)) *
+                w;
+              wfCtx.fillStyle = '#ffffff';
+              wfCtx.fillRect(px - 1, 0, 2, h);
+            }
           }
         }
-        wfCtx.putImageData(imgData, 0, 0);
+      } else {
+        // Live Mic / Synth history buffer
+        const frames = historyFramesRef.current;
+        const totalFrames = frames.length;
+        if (totalFrames === 0) {
+          wfCtx.fillStyle = '#050507';
+          wfCtx.fillRect(0, 0, w, h);
+        } else {
+          const binLen = frames[0].length;
+          const visibleFrames = Math.max(10, totalFrames / timeZoom);
+          const maxStartFrame = Math.max(0, totalFrames - visibleFrames);
+          const startFrame = timePan * maxStartFrame;
 
-        // Draw file playhead cursor if visible in current zoomed window
-        if (playheadRatio !== null) {
-          const playFrame = playheadRatio * totalFrames;
-          if (playFrame >= startFrame && playFrame <= startFrame + visibleFrames) {
-            const px = ((playFrame - startFrame) / visibleFrames) * w;
-            wfCtx.fillStyle = '#ffffff';
-            wfCtx.fillRect(px - 1, 0, 2, h);
+          const rowBins = new Uint16Array(h);
+          for (let y = 0; y < h; y++) {
+            const hz = yToFreq(y, h, sampleRate);
+            rowBins[y] = Math.min(binLen - 1, Math.max(0, Math.floor((hz / nyquist) * binLen)));
           }
+
+          const imgData = wfCtx.createImageData(w, h);
+          const data = imgData.data;
+
+          for (let x = 0; x < w; x++) {
+            const fIdx = Math.min(
+              totalFrames - 1,
+              Math.max(0, Math.floor(startFrame + (x / w) * visibleFrames))
+            );
+            const col = frames[fIdx];
+            if (!col) continue;
+            const cLen = col.length;
+            for (let y = 0; y < h; y++) {
+              const bin = Math.min(cLen - 1, rowBins[y]);
+              const rawNorm = col[bin] / 255;
+              const ramped = applyColorRamp(rawNorm, rampLow, rampHigh);
+              const [r, g, b] = mapHeatmapColor(ramped, theme);
+              const pIdx = (y * w + x) * 4;
+              data[pIdx] = r;
+              data[pIdx + 1] = g;
+              data[pIdx + 2] = b;
+              data[pIdx + 3] = 255;
+            }
+          }
+          wfCtx.putImageData(imgData, 0, 0);
         }
       }
 
-      // 2. Render Zoomed & Panned FFT Frequency Histogram (Lower Graph)
+      // 2. Render Lower FFT Frequency Histogram with ColorRamp Applied
       const sw = spCanvas.width;
       const sh = spCanvas.height;
       spCtx.fillStyle = '#070708';
@@ -482,17 +574,19 @@ const SpectrogramLab: React.FC = () => {
       }
 
       const activeSpec = latestSpectrumRef.current;
-      const numBars = 160;
+      const specLen = activeSpec.length || 1;
+      const numBars = 180;
       const barW = sw / numBars;
 
       for (let i = 0; i < numBars; i++) {
         const viewNorm = i / numBars;
         const hz = normToFreq(viewNorm, sampleRate);
-        const bin = Math.min(STORED_BINS - 1, Math.max(0, Math.floor((hz / nyquist) * STORED_BINS)));
-        const val = Math.min(1, (activeSpec[bin] / 255) * gainBoost);
+        const bin = Math.min(specLen - 1, Math.max(0, Math.floor((hz / nyquist) * specLen)));
+        const rawNorm = activeSpec[bin] / 255;
+        const val = applyColorRamp(rawNorm, rampLow, rampHigh);
         const barH = val * (sh - 20);
 
-        const [r, g, b] = mapHeatmapColor(Math.max(0.25, val), theme);
+        const [r, g, b] = mapHeatmapColor(val, theme);
         spCtx.fillStyle = `rgb(${r},${g},${b})`;
         spCtx.fillRect(i * barW + 1, sh - 16 - barH, Math.max(1, barW - 1.5), barH);
       }
@@ -504,15 +598,15 @@ const SpectrogramLab: React.FC = () => {
       for (let i = 0; i < numBars; i++) {
         const viewNorm = i / numBars;
         const hz = normToFreq(viewNorm, sampleRate);
-        const bin = Math.min(STORED_BINS - 1, Math.max(0, Math.floor((hz / nyquist) * STORED_BINS)));
-        const pk = Math.min(1, (peakHoldRef.current[bin] / 255) * gainBoost);
+        const bin = Math.min(specLen - 1, Math.max(0, Math.floor((hz / nyquist) * specLen)));
+        const pk = applyColorRamp(peakHoldRef.current[bin] / 255, rampLow, rampHigh);
         const py = sh - 16 - pk * (sh - 20);
         if (i === 0) spCtx.moveTo(i * barW, py);
         else spCtx.lineTo(i * barW, py);
       }
       spCtx.stroke();
 
-      // Frequency X-Axis ticks along bottom of FFT Histogram
+      // Frequency X-Axis Ticks
       spCtx.fillStyle = '#71717a';
       spCtx.font = '10px "JetBrains Mono", monospace';
       for (let t = 0; t <= 6; t++) {
@@ -523,15 +617,27 @@ const SpectrogramLab: React.FC = () => {
         spCtx.fillText(label, tx, sh - 3);
       }
     },
-    [timeZoom, timePan, gainBoost, theme, yToFreq, normToFreq]
+    [sourceMode, timeZoom, timePan, rampLow, rampHigh, theme, yToFreq, normToFreq, visibleTimeWindow]
   );
 
-  // Re-draw immediately when zoom/pan/theme changes even while paused/frozen
   useEffect(() => {
-    drawCanvases(null);
-  }, [timeZoom, timePan, freqZoom, freqPan, theme, logScale, gainBoost, drawCanvases]);
+    drawCanvases(sourceMode === 'file' ? filePauseOffsetRef.current : null);
+  }, [
+    timeZoom,
+    timePan,
+    freqZoom,
+    freqPan,
+    theme,
+    logScale,
+    rampLow,
+    rampHigh,
+    sampleRateSlices,
+    fftSize,
+    drawCanvases,
+    sourceMode,
+  ]);
 
-  // Main Real-Time Audio Capture & Playback Loop
+  // Main Real-Time Loop
   useEffect(() => {
     if (sourceMode === 'none') return;
 
@@ -554,11 +660,9 @@ const SpectrogramLab: React.FC = () => {
       const sampleRate = ctxAudio.sampleRate;
       const nyquist = sampleRate / 2;
 
-      // Downsample / map live FFT into STORED_BINS (512)
-      const col = new Uint8Array(STORED_BINS);
-      for (let b = 0; b < STORED_BINS; b++) {
-        const srcIdx = Math.min(binCount - 1, Math.floor((b / STORED_BINS) * binCount));
-        const v = freqData[srcIdx];
+      const col = new Uint8Array(binCount);
+      for (let b = 0; b < binCount; b++) {
+        const v = freqData[b];
         col[b] = v;
         if (v > peakHoldRef.current[b]) {
           peakHoldRef.current[b] = v;
@@ -568,34 +672,30 @@ const SpectrogramLab: React.FC = () => {
       }
       latestSpectrumRef.current = col;
 
-      // For Live Mic or Synth, append column to history buffer (up to 10,000 frames)
       if (sourceMode === 'mic' || sourceMode === 'synth') {
         historyFramesRef.current.push(col);
-        if (historyFramesRef.current.length > 10000) {
+        const maxHistory = Math.max(4000, sampleRateSlices * 6);
+        if (historyFramesRef.current.length > maxHistory) {
           historyFramesRef.current.shift();
         }
-        if (autoFollow) {
-          setTimePan(1);
-        }
+        if (autoFollow) setTimePan(1);
       }
 
-      // Compute file playhead ratio for Audio File mode
-      let playheadRatio: number | null = null;
+      let playheadSec: number | null = null;
       if (sourceMode === 'file' && loadedBufferRef.current) {
         const dur = loadedBufferRef.current.duration;
-        const elapsed = isFilePlaying
+        playheadSec = isFilePlaying
           ? ((ctxAudio.currentTime - fileStartWallRef.current) % dur + dur) % dur
           : filePauseOffsetRef.current;
-        playheadRatio = dur > 0 ? elapsed / dur : 0;
 
         if (autoFollow && isFilePlaying && timeZoom > 1) {
+          const playRatio = dur > 0 ? playheadSec / dur : 0;
           const visRatio = 1 / timeZoom;
-          const centered = Math.max(0, Math.min(1, (playheadRatio - visRatio / 2) / Math.max(0.001, 1 - visRatio)));
+          const centered = Math.max(0, Math.min(1, (playRatio - visRatio / 2) / Math.max(0.001, 1 - visRatio)));
           setTimePan(centered);
         }
       }
 
-      // Telemetry computation
       let maxVal = 0;
       let maxBin = 0;
       let weightedSum = 0;
@@ -642,14 +742,14 @@ const SpectrogramLab: React.FC = () => {
         });
       }
 
-      drawCanvases(playheadRatio);
+      drawCanvases(playheadSec);
     };
 
     rafRef.current = requestAnimationFrame(renderLoop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [sourceMode, isFrozen, autoFollow, isFilePlaying, timeZoom, drawCanvases]);
+  }, [sourceMode, isFrozen, autoFollow, isFilePlaying, timeZoom, sampleRateSlices, drawCanvases]);
 
-  // Global Mouse Drag Handler for Canvas Panning (Left/Right Time & Up/Down Frequency)
+  // Global Mouse Drag Handler for Canvas Panning
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const drag = panDragRef.current;
@@ -699,20 +799,23 @@ const SpectrogramLab: React.FC = () => {
     link.click();
   };
 
-  const sampleRate = audioCtxRef.current?.sampleRate || 44100;
+  const sampleRate = loadedBufferRef.current?.sampleRate || audioCtxRef.current?.sampleRate || 44100;
   const freqAxisTicks = [1, 0.85, 0.7, 0.55, 0.4, 0.25, 0.1, 0].map((n) => {
     const hz = Math.round(normToFreq(n, sampleRate));
     return hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${hz} Hz`;
   });
 
-  // Visible time window calculation for long audio files
-  const visibleTimeWindow = (() => {
-    const dur = fileDuration || historyFramesRef.current.length / 60;
-    if (dur <= 0) return { start: 0, end: 0 };
-    const span = dur / timeZoom;
-    const start = timePan * Math.max(0, dur - span);
-    return { start, end: start + span };
-  })();
+  // Build CSS linear-gradient string for the Blender-style ColorRamp preview bar
+  const colorRampGradientCss = useMemo(() => {
+    const stops: string[] = [];
+    for (let i = 0; i <= 20; i++) {
+      const pct = i / 20;
+      const ramped = applyColorRamp(pct, rampLow, rampHigh);
+      const [r, g, b] = mapHeatmapColor(ramped, theme);
+      stops.push(`rgb(${r},${g},${b}) ${pct * 100}%`);
+    }
+    return `linear-gradient(to right, ${stops.join(', ')})`;
+  }, [rampLow, rampHigh, theme]);
 
   return (
     <div className="space-y-4">
@@ -854,7 +957,7 @@ const SpectrogramLab: React.FC = () => {
       {/* Main Waterfall Heatmap + Histogram + Controls */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div className="lg:col-span-9 space-y-3">
-          {/* 2D Waterfall Heatmap Spectrogram with Wheel Zoom & Drag Pan */}
+          {/* 2D Waterfall Heatmap Spectrogram */}
           <div className="studio-panel rounded-lg overflow-hidden">
             <div className="h-8 px-3 bg-[#0a0a0d] border-b border-zinc-800/80 flex items-center justify-between text-[11px] font-mono text-zinc-400">
               <div className="flex items-center gap-3">
@@ -864,16 +967,16 @@ const SpectrogramLab: React.FC = () => {
                 <span>
                   Freq Zoom: <strong className="text-white">{freqZoom.toFixed(1)}x</strong>
                 </span>
+                <span>
+                  Rate: <strong className="text-white">{sampleRateSlices} slices</strong>
+                </span>
                 {visibleTimeWindow.end > 0 && (
                   <span className="hidden sm:inline text-zinc-500">
-                    Window: {visibleTimeWindow.start.toFixed(1)}s – {visibleTimeWindow.end.toFixed(1)}s
+                    {visibleTimeWindow.start.toFixed(2)}s – {visibleTimeWindow.end.toFixed(2)}s
                   </span>
                 )}
               </div>
               <div className="flex items-center gap-2">
-                <span className="hidden md:inline text-[10px] text-zinc-500">
-                  Wheel = Time Zoom • Shift+Wheel = Freq Zoom • Drag = Pan
-                </span>
                 {(timeZoom > 1 || freqZoom > 1) && (
                   <button
                     onClick={() => {
@@ -895,9 +998,9 @@ const SpectrogramLab: React.FC = () => {
                 e.preventDefault();
                 const factor = e.deltaY < 0 ? 1.25 : 0.8;
                 if (e.shiftKey) {
-                  setFreqZoom((z) => Math.max(1, Math.min(10, Number((z * factor).toFixed(2)))));
+                  setFreqZoom((z) => Math.max(1, Math.min(12, Number((z * factor).toFixed(2)))));
                 } else {
-                  setTimeZoom((z) => Math.max(1, Math.min(20, Number((z * factor).toFixed(2)))));
+                  setTimeZoom((z) => Math.max(1, Math.min(40, Number((z * factor).toFixed(2)))));
                 }
               }}
               onMouseDown={(e) => {
@@ -939,8 +1042,8 @@ const SpectrogramLab: React.FC = () => {
             >
               <canvas
                 ref={waterfallCanvasRef}
-                width={920}
-                height={330}
+                width={960}
+                height={340}
                 className="w-full h-72 sm:h-80 block"
               />
 
@@ -951,7 +1054,7 @@ const SpectrogramLab: React.FC = () => {
                 ))}
               </div>
 
-              {/* Mouse Crosshair Frequency & Timestamp Inspection */}
+              {/* Mouse Crosshair */}
               {hoverInfo && (
                 <>
                   <div
@@ -989,10 +1092,9 @@ const SpectrogramLab: React.FC = () => {
               <button
                 onClick={() => {
                   setAutoFollow(false);
-                  setTimePan((p) => Math.max(0, Number((p - 0.1).toFixed(3))));
+                  setTimePan((p) => Math.max(0, Number((p - 0.08).toFixed(4))));
                 }}
                 className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono text-zinc-300"
-                title="Pan Left"
               >
                 ← Left
               </button>
@@ -1005,7 +1107,7 @@ const SpectrogramLab: React.FC = () => {
                   type="range"
                   min="0"
                   max="1"
-                  step="0.002"
+                  step="0.001"
                   value={timePan}
                   onChange={(e) => {
                     setAutoFollow(false);
@@ -1017,10 +1119,9 @@ const SpectrogramLab: React.FC = () => {
               <button
                 onClick={() => {
                   setAutoFollow(false);
-                  setTimePan((p) => Math.min(1, Number((p + 0.1).toFixed(3))));
+                  setTimePan((p) => Math.min(1, Number((p + 0.08).toFixed(4))));
                 }}
                 className="px-2 py-1 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-mono text-zinc-300"
-                title="Pan Right"
               >
                 Right →
               </button>
@@ -1041,10 +1142,10 @@ const SpectrogramLab: React.FC = () => {
             </div>
           </div>
 
-          {/* Lower FFT Frequency Histogram with Direct Wheel Zoom & Drag Left/Right Frequency Pan */}
+          {/* Lower FFT Frequency Histogram */}
           <div className="studio-panel rounded-lg overflow-hidden bg-[#070708]">
             <div className="h-7 px-3 bg-[#0a0a0d] border-b border-zinc-800/80 flex items-center justify-between text-[10px] font-mono text-zinc-400">
-              <span>FFT FREQUENCY HISTOGRAM (WHEEL TO ZOOM FREQ • DRAG LEFT/RIGHT TO PAN)</span>
+              <span>FFT FREQUENCY HISTOGRAM (WHEEL TO ZOOM • DRAG LEFT/RIGHT TO PAN)</span>
               <span>
                 {Math.round(normToFreq(0, sampleRate))} Hz – {Math.round(normToFreq(1, sampleRate))} Hz
               </span>
@@ -1053,7 +1154,7 @@ const SpectrogramLab: React.FC = () => {
               onWheel={(e) => {
                 e.preventDefault();
                 const factor = e.deltaY < 0 ? 1.25 : 0.8;
-                setFreqZoom((z) => Math.max(1, Math.min(10, Number((z * factor).toFixed(2)))));
+                setFreqZoom((z) => Math.max(1, Math.min(12, Number((z * factor).toFixed(2)))));
               }}
               onMouseDown={(e) => {
                 panDragRef.current = {
@@ -1069,7 +1170,7 @@ const SpectrogramLab: React.FC = () => {
             >
               <canvas
                 ref={spectrumCanvasRef}
-                width={920}
+                width={960}
                 height={140}
                 className="w-full h-32 block"
               />
@@ -1077,40 +1178,137 @@ const SpectrogramLab: React.FC = () => {
           </div>
         </div>
 
-        {/* Right Zoom, Pan & DSP Controls */}
+        {/* Right Controls: Blender ColorRamp, Sampling Rate, Zoom & DSP */}
         <div className="lg:col-span-3 studio-panel rounded-lg p-4 space-y-4">
-          {/* Explicit Zoom & Pan Controls */}
+          {/* 1. BLENDER-STYLE COLOR RAMP (2 SLIDERS) */}
+          <div className="space-y-2.5 pb-3 border-b border-zinc-800">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono uppercase text-zinc-300 font-semibold">
+                Color Ramp
+              </span>
+              <button
+                onClick={() => {
+                  setRampLow(0.12);
+                  setRampHigh(0.85);
+                }}
+                className="text-[10px] font-mono text-zinc-500 hover:text-white"
+              >
+                Reset
+              </button>
+            </div>
+
+            {/* Visual ColorRamp Gradient Preview with Stop Markers */}
+            <div className="relative h-5 rounded border border-zinc-700 overflow-hidden" style={{ background: colorRampGradientCss }}>
+              <div
+                style={{ left: `${rampLow * 100}%` }}
+                className="absolute inset-y-0 w-1 -ml-0.5 bg-black border-x border-white pointer-events-none"
+              />
+              <div
+                style={{ left: `${rampHigh * 100}%` }}
+                className="absolute inset-y-0 w-1 -ml-0.5 bg-white border-x border-black pointer-events-none"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-400">Low Cut (Dark Stop)</span>
+                <span className="font-mono text-zinc-200">{Math.round(rampLow * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="0.98"
+                step="0.01"
+                value={rampLow}
+                onChange={(e) => setRampLow(parseFloat(e.target.value))}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-400">High Cut (Bright Stop)</span>
+                <span className="font-mono text-zinc-200">{Math.round(rampHigh * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0.02"
+                max="1"
+                step="0.01"
+                value={rampHigh}
+                onChange={(e) => setRampHigh(parseFloat(e.target.value))}
+              />
+            </div>
+          </div>
+
+          {/* 2. SAMPLING RATE / TEMPORAL & FFT PRECISION */}
           <div className="space-y-2.5 pb-3 border-b border-zinc-800">
             <div className="flex justify-between text-xs">
-              <span className="text-zinc-300 font-medium">Time Zoom (X)</span>
+              <span className="text-zinc-300 font-medium">Sampling Rate (Slices)</span>
+              <span className="font-mono text-white">{sampleRateSlices}</span>
+            </div>
+            <input
+              type="range"
+              min="240"
+              max="1920"
+              step="120"
+              value={sampleRateSlices}
+              onChange={(e) => setSampleRateSlices(parseInt(e.target.value))}
+            />
+
+            <div>
+              <label className="block text-[10px] font-mono uppercase text-zinc-500 mb-1">
+                FFT Frequency Bins
+              </label>
+              <div className="grid grid-cols-3 gap-1.5">
+                {[1024, 2048, 4096].map((sz) => (
+                  <button
+                    key={sz}
+                    onClick={() => setFftSize(sz)}
+                    className={`py-1 rounded text-xs font-mono border ${
+                      fftSize === sz
+                        ? 'bg-white text-black border-white font-semibold'
+                        : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                    }`}
+                  >
+                    {sz}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* 3. ZOOM & PAN CONTROLS */}
+          <div className="space-y-2.5 pb-3 border-b border-zinc-800">
+            <div className="flex justify-between text-xs">
+              <span className="text-zinc-400">Time Zoom (X)</span>
               <span className="font-mono text-white">{timeZoom.toFixed(1)}x</span>
             </div>
             <input
               type="range"
               min="1"
-              max="20"
+              max="40"
               step="0.5"
               value={timeZoom}
               onChange={(e) => setTimeZoom(parseFloat(e.target.value))}
             />
 
-            <div className="flex justify-between text-xs pt-1">
-              <span className="text-zinc-300 font-medium">Freq Zoom (Histogram)</span>
+            <div className="flex justify-between text-xs">
+              <span className="text-zinc-400">Freq Zoom (Histogram)</span>
               <span className="font-mono text-white">{freqZoom.toFixed(1)}x</span>
             </div>
             <input
               type="range"
               min="1"
-              max="10"
+              max="12"
               step="0.25"
               value={freqZoom}
               onChange={(e) => setFreqZoom(parseFloat(e.target.value))}
             />
 
             {freqZoom > 1 && (
-              <div className="space-y-1 pt-1">
+              <div className="space-y-1">
                 <div className="flex justify-between text-xs">
-                  <span className="text-zinc-400">Freq Band Pan (L/R)</span>
+                  <span className="text-zinc-400">Freq Band Pan</span>
                   <span className="font-mono text-zinc-200">{Math.round(freqPan * 100)}%</span>
                 </div>
                 <input
@@ -1125,6 +1323,7 @@ const SpectrogramLab: React.FC = () => {
             )}
           </div>
 
+          {/* 4. PALETTE & SCALE */}
           <div>
             <label className="block text-[10px] font-mono uppercase text-zinc-500 mb-1.5">
               Heatmap Palette
@@ -1152,70 +1351,28 @@ const SpectrogramLab: React.FC = () => {
             </div>
           </div>
 
-          <div>
-            <label className="block text-[10px] font-mono uppercase text-zinc-500 mb-1.5">
-              Frequency Scale
-            </label>
-            <div className="grid grid-cols-2 gap-1.5">
-              <button
-                onClick={() => setLogScale(true)}
-                className={`py-1.5 rounded text-xs font-mono border ${
-                  logScale
-                    ? 'bg-white text-black border-white font-semibold'
-                    : 'bg-zinc-900 text-zinc-400 border-zinc-800'
-                }`}
-              >
-                Logarithmic
-              </button>
-              <button
-                onClick={() => setLogScale(false)}
-                className={`py-1.5 rounded text-xs font-mono border ${
-                  !logScale
-                    ? 'bg-white text-black border-white font-semibold'
-                    : 'bg-zinc-900 text-zinc-400 border-zinc-800'
-                }`}
-              >
-                Linear
-              </button>
-            </div>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              onClick={() => setLogScale(true)}
+              className={`py-1.5 rounded text-xs font-mono border ${
+                logScale
+                  ? 'bg-white text-black border-white font-semibold'
+                  : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+              }`}
+            >
+              Logarithmic
+            </button>
+            <button
+              onClick={() => setLogScale(false)}
+              className={`py-1.5 rounded text-xs font-mono border ${
+                !logScale
+                  ? 'bg-white text-black border-white font-semibold'
+                  : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+              }`}
+            >
+              Linear
+            </button>
           </div>
-
-          <div className="space-y-1">
-            <div className="flex justify-between text-xs">
-              <span className="text-zinc-400">Gain / Sensitivity</span>
-              <span className="font-mono text-zinc-200">{Math.round(gainBoost * 100)}%</span>
-            </div>
-            <input
-              type="range"
-              min="0.5"
-              max="2.5"
-              step="0.1"
-              value={gainBoost}
-              onChange={(e) => setGainBoost(parseFloat(e.target.value))}
-            />
-          </div>
-
-          <div className="space-y-1">
-            <div className="flex justify-between text-xs">
-              <span className="text-zinc-400">Smoothing</span>
-              <span className="font-mono text-zinc-200">{Math.round(smoothing * 100)}%</span>
-            </div>
-            <input
-              type="range"
-              min="0"
-              max="0.95"
-              step="0.05"
-              value={smoothing}
-              onChange={(e) => setSmoothing(parseFloat(e.target.value))}
-            />
-          </div>
-
-          <button
-            onClick={() => peakHoldRef.current.fill(0)}
-            className="w-full py-1.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs text-zinc-300"
-          >
-            Reset Peak Hold
-          </button>
         </div>
       </div>
     </div>
