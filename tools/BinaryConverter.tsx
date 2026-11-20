@@ -1,58 +1,100 @@
-
 import React, { useState } from 'react';
 
 const BinaryConverter: React.FC = () => {
-  const [text, setText] = useState('');
-  const [binary, setBinary] = useState('');
+  const [bytes, setBytes] = useState<number[]>(() =>
+    Array.from(new TextEncoder().encode('MONOLITH'))
+  );
 
-  const toBinary = (val: string) => {
-    setText(val);
-    const bin = val.split('').map(char => char.charCodeAt(0).toString(2).padStart(8, '0')).join(' ');
-    setBinary(bin);
-  };
-
-  const toText = (val: string) => {
-    setBinary(val);
-    const cleanBin = val.replace(/[^01]/g, '');
-    let txt = '';
-    for (let i = 0; i < cleanBin.length; i += 8) {
-      const byte = cleanBin.substring(i, i + 8);
-      if (byte.length === 8) {
-        txt += String.fromCharCode(parseInt(byte, 2));
-      }
-    }
-    setText(txt);
-  };
+  const textVal = new TextDecoder().decode(new Uint8Array(bytes));
+  const binVal = bytes.map((b) => b.toString(2).padStart(8, '0')).join(' ');
+  const hexVal = bytes.map((b) => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+  const decVal = bytes.map((b) => b.toString(10)).join(' ');
 
   return (
-    <div className="tool-panel">
-      <h2 className="text-3xl font-bold text-white mb-2">Binary Converter</h2>
-      <p className="text-slate-400 mb-8">Low-level encoding conversion</p>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+        <h1 className="text-base font-semibold text-white">Binary Tool</h1>
+        <button
+          onClick={() => setBytes([])}
+          className="px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-400 hover:text-white"
+        >
+          Clear
+        </button>
+      </div>
 
-      <div className="space-y-8 max-w-4xl mx-auto">
-        <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-xl">
-          <label className="block text-xs font-bold text-slate-500 uppercase mb-4 tracking-widest">ASCII Text String</label>
-          <textarea 
-            value={text}
-            onChange={(e) => toBinary(e.target.value)}
-            className="w-full h-40 bg-slate-950 border border-slate-800 rounded-xl p-4 text-slate-200 focus:outline-none focus:border-purple-500 font-sans"
-            placeholder="Type your text here..."
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="studio-panel rounded-lg p-3.5 space-y-2">
+          <div className="flex justify-between text-xs font-mono text-zinc-400">
+            <span>TEXT</span>
+            <button onClick={() => navigator.clipboard.writeText(textVal)} className="hover:text-white">
+              Copy
+            </button>
+          </div>
+          <textarea
+            value={textVal}
+            onChange={(e) => setBytes(Array.from(new TextEncoder().encode(e.target.value)))}
+            rows={4}
+            placeholder="Text..."
+            className="w-full bg-[#070708] border border-zinc-800 rounded p-2.5 text-xs font-mono text-white focus:outline-none resize-none select-text"
           />
         </div>
 
-        <div className="flex justify-center">
-          <div className="w-12 h-12 bg-purple-600 rounded-full flex items-center justify-center text-white shadow-lg">
-            <i className="fas fa-exchange-alt"></i>
+        <div className="studio-panel rounded-lg p-3.5 space-y-2">
+          <div className="flex justify-between text-xs font-mono text-zinc-400">
+            <span>BINARY</span>
+            <button onClick={() => navigator.clipboard.writeText(binVal)} className="hover:text-white">
+              Copy
+            </button>
           </div>
+          <textarea
+            value={binVal}
+            onChange={(e) => {
+              const tokens = e.target.value.trim().split(/\s+/).filter(Boolean);
+              setBytes(tokens.map((t) => parseInt(t.replace(/[^01]/g, '') || '0', 2) & 0xff));
+            }}
+            rows={4}
+            placeholder="01001111..."
+            className="w-full bg-[#070708] border border-zinc-800 rounded p-2.5 text-xs font-mono text-zinc-200 focus:outline-none resize-none select-text"
+          />
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 p-8 rounded-2xl shadow-xl">
-          <label className="block text-xs font-bold text-slate-500 uppercase mb-4 tracking-widest">Binary (Base-2)</label>
-          <textarea 
-            value={binary}
-            onChange={(e) => toText(e.target.value)}
-            className="w-full h-40 bg-slate-950 border border-slate-800 rounded-xl p-4 text-purple-400 focus:outline-none focus:border-purple-500 font-mono text-sm tracking-tighter"
-            placeholder="01001111 01001110 01011001 01011000"
+        <div className="studio-panel rounded-lg p-3.5 space-y-2">
+          <div className="flex justify-between text-xs font-mono text-zinc-400">
+            <span>HEX</span>
+            <button onClick={() => navigator.clipboard.writeText(hexVal)} className="hover:text-white">
+              Copy
+            </button>
+          </div>
+          <textarea
+            value={hexVal}
+            onChange={(e) => {
+              const clean = e.target.value.replace(/[^0-9a-fA-F]/g, '');
+              const out: number[] = [];
+              for (let i = 0; i < clean.length; i += 2) out.push(parseInt(clean.slice(i, i + 2), 16) & 0xff);
+              setBytes(out);
+            }}
+            rows={3}
+            placeholder="4F 4E 59 58..."
+            className="w-full bg-[#070708] border border-zinc-800 rounded p-2.5 text-xs font-mono text-zinc-200 focus:outline-none resize-none select-text"
+          />
+        </div>
+
+        <div className="studio-panel rounded-lg p-3.5 space-y-2">
+          <div className="flex justify-between text-xs font-mono text-zinc-400">
+            <span>DECIMAL</span>
+            <button onClick={() => navigator.clipboard.writeText(decVal)} className="hover:text-white">
+              Copy
+            </button>
+          </div>
+          <textarea
+            value={decVal}
+            onChange={(e) => {
+              const tokens = e.target.value.trim().split(/[\s,]+/).filter(Boolean);
+              setBytes(tokens.map((t) => (parseInt(t, 10) || 0) & 0xff));
+            }}
+            rows={3}
+            placeholder="79 78 89 88..."
+            className="w-full bg-[#070708] border border-zinc-800 rounded p-2.5 text-xs font-mono text-zinc-200 focus:outline-none resize-none select-text"
           />
         </div>
       </div>

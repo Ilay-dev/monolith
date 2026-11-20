@@ -1,8 +1,5 @@
 {
-  "name": "ONYX STUDIO PRO",
-  "description": "Premium multi-tool suite for creators. Local-first image editing, DAW-grade audio mixing, rich-text PDF generation, and secure developer utilities.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone"
-  ]
+  "name": "MONOLITH",
+  "description": "Minimalist local creative and engineering workstation for video editing, image grading, vector/raster painting, multi-track DAW audio mixing, 3D mesh conversion, signal synthesis, QR design, and EXIF inspection.",
+  "requestFramePermissions": []
 }

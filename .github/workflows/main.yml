@@ -1,9 +1,8 @@
-
 name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 permissions:
@@ -27,9 +26,11 @@ jobs:
           node-version: 20
       - name: Install dependencies
         run: npm install
-      - name: Build
+      - name: Build production bundle
         run: npm run build
-      - name: Upload artifact
+      - name: Add .nojekyll for GitHub Pages
+        run: touch ./dist/.nojekyll
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./dist

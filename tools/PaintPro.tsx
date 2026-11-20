@@ -1,21 +1,34 @@
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
-import React, { useState, useRef, useEffect } from 'react';
-
-type PaintTool = 'select' | 'brush' | 'line' | 'rect' | 'circle' | 'eraser' | 'text';
+type PaintTool =
+  | 'select'
+  | 'brush'
+  | 'highlighter'
+  | 'line'
+  | 'arrow'
+  | 'rect'
+  | 'circle'
+  | 'polygon'
+  | 'eraser'
+  | 'text'
+  | 'eyedropper';
 
 interface PaintElement {
   id: string;
+  name: string;
   type: PaintTool;
   x: number;
   y: number;
   width: number;
   height: number;
   points?: { x: number; y: number }[];
-  color1: string;
-  color2: string;
-  useGradient: boolean;
-  brushSize: number;
+  strokeColor: string;
+  fillColor: string;
+  filled: boolean;
+  strokeWidth: number;
+  opacity: number;
   text?: string;
+  visible: boolean;
   img?: HTMLImageElement;
 }
 
@@ -23,123 +36,192 @@ const PaintPro: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [activeTool, setActiveTool] = useState<PaintTool>('brush');
   const [elements, setElements] = useState<PaintElement[]>([]);
-  const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
-  
-  const [color1, setColor1] = useState('#a855f7');
-  const [color2, setColor2] = useState('#ffffff');
-  const [useGradient, setUseGradient] = useState(false);
-  const [brushSize, setBrushSize] = useState(5);
-  
+  const [history, setHistory] = useState<PaintElement[][]>([[]]);
+  const [historyIndex, setHistoryIndex] = useState(0);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const [strokeColor, setStrokeColor] = useState('#ffffff');
+  const [fillColor, setFillColor] = useState('#ff4f00');
+  const [filled, setFilled] = useState(false);
+  const [strokeWidth, setStrokeWidth] = useState(6);
+  const [opacity, setOpacity] = useState(100);
+  const [bgColor, setBgColor] = useState<'#09090b' | '#000000' | '#ffffff' | 'transparent'>('#09090b');
+
   const [isDrawing, setIsDrawing] = useState(false);
   const [startPos, setStartPos] = useState({ x: 0, y: 0 });
   const [currentElement, setCurrentElement] = useState<PaintElement | null>(null);
-  
-  const [canvasSize, setCanvasSize] = useState({ width: 1600, height: 1000 });
 
-  useEffect(() => {
-    render();
-  }, [elements, currentElement, canvasSize, selectedElementId]);
+  const canvasSize = { width: 1600, height: 1000 };
 
-  const render = () => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  const commitElements = useCallback(
+    (next: PaintElement[]) => {
+      setElements(next);
+      setHistory((prev) => [...prev.slice(0, historyIndex + 1).slice(-25), next]);
+      setHistoryIndex((prev) => Math.min(25, prev + 1));
+    },
+    [historyIndex]
+  );
 
-    ctx.fillStyle = '#0a0a0a';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const undo = useCallback(() => {
+    if (historyIndex > 0) {
+      const idx = historyIndex - 1;
+      setHistoryIndex(idx);
+      setElements(history[idx]);
+      setSelectedId(null);
+    }
+  }, [history, historyIndex]);
 
-    [...elements, currentElement].filter(Boolean).forEach((el) => {
-      drawElement(ctx, el!);
-      if (el?.id === selectedElementId) {
-        drawSelectionBox(ctx, el!);
+  const redo = useCallback(() => {
+    if (historyIndex < history.length - 1) {
+      const idx = historyIndex + 1;
+      setHistoryIndex(idx);
+      setElements(history[idx]);
+      setSelectedId(null);
+    }
+  }, [history, historyIndex]);
+
+  const getBounds = (el: PaintElement) => {
+    if (el.points && el.points.length > 0) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of el.points) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
       }
-    });
+      return { x: minX, y: minY, w: Math.max(20, maxX - minX), h: Math.max(20, maxY - minY) };
+    }
+    return {
+      x: Math.min(el.x, el.x + el.width),
+      y: Math.min(el.y, el.y + el.height),
+      w: Math.max(20, Math.abs(el.width)),
+      h: Math.max(20, Math.abs(el.height)),
+    };
   };
 
   const drawElement = (ctx: CanvasRenderingContext2D, el: PaintElement) => {
-    ctx.lineWidth = el.brushSize;
+    if (!el.visible) return;
+    ctx.save();
+    ctx.globalAlpha = (el.opacity ?? 100) / 100;
+    ctx.lineWidth = el.strokeWidth;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = el.color1;
-    
-    if (el.useGradient && el.type !== 'brush' && el.type !== 'eraser' && el.type !== 'text') {
-      const grad = ctx.createLinearGradient(el.x, el.y, el.x + el.width, el.y + el.height);
-      grad.addColorStop(0, el.color1);
-      grad.addColorStop(1, el.color2);
-      ctx.fillStyle = grad;
-    } else {
-      ctx.fillStyle = el.color1;
-    }
+    ctx.strokeStyle = el.strokeColor;
+    ctx.fillStyle = el.fillColor;
 
     switch (el.type) {
       case 'brush':
-      case 'eraser':
+      case 'highlighter':
+      case 'eraser': {
         if (el.points && el.points.length > 0) {
           ctx.beginPath();
-          ctx.strokeStyle = el.type === 'eraser' ? '#0a0a0a' : el.color1;
+          if (el.type === 'eraser') ctx.strokeStyle = bgColor === 'transparent' ? '#09090b' : bgColor;
+          else if (el.type === 'highlighter') ctx.globalAlpha = 0.35;
           ctx.moveTo(el.points[0].x, el.points[0].y);
-          el.points.forEach(p => ctx.lineTo(p.x, p.y));
+          for (let i = 1; i < el.points.length; i++) ctx.lineTo(el.points[i].x, el.points[i].y);
           ctx.stroke();
         }
         break;
-      case 'line':
+      }
+      case 'line': {
         ctx.beginPath();
         ctx.moveTo(el.x, el.y);
         ctx.lineTo(el.x + el.width, el.y + el.height);
         ctx.stroke();
         break;
-      case 'rect':
-        ctx.fillRect(el.x, el.y, el.width, el.height);
-        ctx.strokeRect(el.x, el.y, el.width, el.height);
-        break;
-      case 'circle':
-        const radius = Math.sqrt(el.width ** 2 + el.height ** 2);
+      }
+      case 'arrow': {
+        const ex = el.x + el.width, ey = el.y + el.height;
+        const angle = Math.atan2(ey - el.y, ex - el.x);
+        const head = Math.max(14, el.strokeWidth * 3.5);
         ctx.beginPath();
-        ctx.arc(el.x, el.y, radius, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.moveTo(el.x, el.y);
+        ctx.lineTo(ex, ey);
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - head * Math.cos(angle - Math.PI / 6), ey - head * Math.sin(angle - Math.PI / 6));
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - head * Math.cos(angle + Math.PI / 6), ey - head * Math.sin(angle + Math.PI / 6));
         ctx.stroke();
         break;
-      case 'text':
-        ctx.font = `bold ${el.brushSize * 4}px Inter, sans-serif`;
-        ctx.fillText(el.text || 'New Text', el.x, el.y);
+      }
+      case 'rect': {
+        if (el.filled) ctx.fillRect(el.x, el.y, el.width, el.height);
+        ctx.strokeRect(el.x, el.y, el.width, el.height);
         break;
-      case 'select':
-        if (el.img) {
-          ctx.drawImage(el.img, el.x, el.y, el.width, el.height);
-        }
+      }
+      case 'circle': {
+        ctx.beginPath();
+        ctx.ellipse(el.x + el.width / 2, el.y + el.height / 2, Math.abs(el.width / 2), Math.abs(el.height / 2), 0, 0, Math.PI * 2);
+        if (el.filled) ctx.fill();
+        ctx.stroke();
         break;
+      }
+      case 'polygon': {
+        ctx.beginPath();
+        ctx.moveTo(el.x + el.width / 2, el.y);
+        ctx.lineTo(el.x + el.width, el.y + el.height);
+        ctx.lineTo(el.x, el.y + el.height);
+        ctx.closePath();
+        if (el.filled) ctx.fill();
+        ctx.stroke();
+        break;
+      }
+      case 'text': {
+        const fs = Math.max(14, el.strokeWidth * 4);
+        ctx.font = `600 ${fs}px Inter, sans-serif`;
+        ctx.fillStyle = el.strokeColor;
+        ctx.fillText(el.text || 'Text', el.x, el.y + fs);
+        break;
+      }
+      case 'select': {
+        if (el.img) ctx.drawImage(el.img, el.x, el.y, el.width, el.height);
+        break;
+      }
     }
+    ctx.restore();
   };
 
-  const drawSelectionBox = (ctx: CanvasRenderingContext2D, el: PaintElement) => {
-    ctx.setLineDash([8, 4]);
-    ctx.strokeStyle = '#a855f7';
-    ctx.lineWidth = 2;
-    const x = el.points ? el.points[0].x : el.x;
-    const y = el.points ? el.points[0].y : el.y;
-    const w = el.width || 40;
-    const h = el.height || 40;
-    ctx.strokeRect(x - 10, y - 10, w + 20, h + 20);
-    ctx.setLineDash([]);
-  };
+  const renderCanvas = useCallback(
+    (includeOverlay = true) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (bgColor !== 'transparent') {
+        ctx.fillStyle = bgColor;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      [...elements, currentElement].filter(Boolean).forEach((el) => {
+        drawElement(ctx, el!);
+        if (includeOverlay && el?.id === selectedId) {
+          const b = getBounds(el!);
+          ctx.save();
+          ctx.setLineDash([6, 4]);
+          ctx.strokeStyle = '#ff4f00';
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(b.x - 6, b.y - 6, b.w + 12, b.h + 12);
+          ctx.restore();
+        }
+      });
+    },
+    [elements, currentElement, bgColor, selectedId]
+  );
+
+  useEffect(() => {
+    renderCanvas(true);
+  }, [renderCanvas]);
 
   const getPos = (e: React.MouseEvent | React.TouchEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
-    
-    let clientX, clientY;
-    if ('touches' in e) {
-      clientX = e.touches[0].clientX;
-      clientY = e.touches[0].clientY;
-    } else {
-      clientX = e.clientX;
-      clientY = e.clientY;
-    }
-
+    const cx = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const cy = 'touches' in e ? e.touches[0].clientY : e.clientY;
     return {
-      x: (clientX - rect.left) * (canvasSize.width / rect.width),
-      y: (clientY - rect.top) * (canvasSize.height / rect.height)
+      x: Math.round((cx - rect.left) * (canvasSize.width / rect.width)),
+      y: Math.round((cy - rect.top) * (canvasSize.height / rect.height)),
     };
   };
 
@@ -148,38 +230,68 @@ const PaintPro: React.FC = () => {
     const pos = getPos(e);
     setStartPos(pos);
 
+    if (activeTool === 'eyedropper') {
+      const p = canvasRef.current?.getContext('2d')?.getImageData(pos.x, pos.y, 1, 1).data;
+      if (p) {
+        setStrokeColor('#' + [p[0], p[1], p[2]].map((v) => v.toString(16).padStart(2, '0')).join(''));
+        setActiveTool('brush');
+      }
+      return;
+    }
+
     if (activeTool === 'select') {
-      const clicked = [...elements].reverse().find(el => {
-        const x = el.points ? el.points[0].x : el.x;
-        const y = el.points ? el.points[0].y : el.y;
-        return pos.x >= x - 20 && pos.x <= x + (el.width || 40) + 20 && 
-               pos.y >= y - 20 && pos.y <= y + (el.height || 40) + 20;
+      const clicked = [...elements].reverse().find((el) => {
+        if (!el.visible) return false;
+        const b = getBounds(el);
+        return pos.x >= b.x - 10 && pos.x <= b.x + b.w + 10 && pos.y >= b.y - 10 && pos.y <= b.y + b.h + 10;
       });
-      setSelectedElementId(clicked ? clicked.id : null);
+      setSelectedId(clicked ? clicked.id : null);
       if (clicked) setIsDrawing(true);
       return;
     }
 
     if (activeTool === 'text') {
-      const newId = Math.random().toString(36);
-      const newEl: PaintElement = {
-        id: newId, type: 'text', x: pos.x, y: pos.y,
-        width: 300, height: brushSize * 4,
-        text: 'EDIT ME IN PANEL',
-        color1, color2, useGradient, brushSize
-      };
-      setElements([...elements, newEl]);
-      setSelectedElementId(newId);
+      const id = Math.random().toString(36).slice(2, 8);
+      commitElements([
+        ...elements,
+        {
+          id,
+          name: `Text #${elements.length + 1}`,
+          type: 'text',
+          x: pos.x,
+          y: pos.y,
+          width: 200,
+          height: strokeWidth * 4,
+          text: 'Text',
+          strokeColor,
+          fillColor,
+          filled,
+          strokeWidth,
+          opacity,
+          visible: true,
+        },
+      ]);
+      setSelectedId(id);
       setActiveTool('select');
       return;
     }
 
     setIsDrawing(true);
-    const newId = Math.random().toString(36);
     setCurrentElement({
-      id: newId, type: activeTool, x: pos.x, y: pos.y, width: 0, height: 0,
-      points: activeTool === 'brush' || activeTool === 'eraser' ? [pos] : undefined,
-      color1, color2, useGradient, brushSize
+      id: Math.random().toString(36).slice(2, 8),
+      name: `${activeTool} #${elements.length + 1}`,
+      type: activeTool,
+      x: pos.x,
+      y: pos.y,
+      width: 0,
+      height: 0,
+      points: ['brush', 'highlighter', 'eraser'].includes(activeTool) ? [pos] : undefined,
+      strokeColor,
+      fillColor,
+      filled,
+      strokeWidth,
+      opacity,
+      visible: true,
     });
   };
 
@@ -188,25 +300,23 @@ const PaintPro: React.FC = () => {
     if ('touches' in e && e.touches.length > 1) return;
     const pos = getPos(e);
 
-    if (activeTool === 'select' && selectedElementId) {
-      setElements(prev => prev.map(el => {
-        if (el.id === selectedElementId) {
-          if (el.points) {
-             const dx = pos.x - startPos.x;
-             const dy = pos.y - startPos.y;
-             return { ...el, points: el.points.map(p => ({ x: p.x + dx, y: p.y + dy })) };
-          }
-          return { ...el, x: pos.x - el.width / 2, y: pos.y - el.height / 2 };
-        }
-        return el;
-      }));
+    if (activeTool === 'select' && selectedId) {
+      const dx = pos.x - startPos.x, dy = pos.y - startPos.y;
+      setElements((prev) =>
+        prev.map((el) =>
+          el.id !== selectedId
+            ? el
+            : el.points
+            ? { ...el, points: el.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) }
+            : { ...el, x: el.x + dx, y: el.y + dy }
+        )
+      );
       setStartPos(pos);
       return;
     }
 
     if (!currentElement) return;
-
-    if (activeTool === 'brush' || activeTool === 'eraser') {
+    if (['brush', 'highlighter', 'eraser'].includes(activeTool)) {
       setCurrentElement({ ...currentElement, points: [...(currentElement.points || []), pos] });
     } else {
       setCurrentElement({ ...currentElement, width: pos.x - startPos.x, height: pos.y - startPos.y });
@@ -214,175 +324,279 @@ const PaintPro: React.FC = () => {
   };
 
   const handleEnd = () => {
-    if (activeTool === 'select') { setIsDrawing(false); return; }
-    if (currentElement) { setElements([...elements, currentElement]); setCurrentElement(null); }
+    if (activeTool === 'select') {
+      if (isDrawing) commitElements([...elements]);
+      setIsDrawing(false);
+      return;
+    }
+    if (currentElement) {
+      commitElements([...elements, currentElement]);
+      setCurrentElement(null);
+    }
     setIsDrawing(false);
   };
 
-  const handleImageImport = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.src = event.target?.result as string;
-      img.onload = () => {
-        const newId = Math.random().toString(36);
-        const newEl: PaintElement = {
-          id: newId, type: 'select', x: 100, y: 100, width: 500, height: (img.height / img.width) * 500,
-          img: img, color1, color2, useGradient, brushSize
-        };
-        setElements([...elements, newEl]);
-        setSelectedElementId(newId);
-        setActiveTool('select');
-      };
-    };
-    reader.readAsDataURL(file);
+  const updateSelected = (updates: Partial<PaintElement>) => {
+    if (!selectedId) return;
+    commitElements(elements.map((el) => (el.id === selectedId ? { ...el, ...updates } : el)));
   };
 
-  const updateSelectedElement = (updates: Partial<PaintElement>) => {
-    if (!selectedElementId) return;
-    setElements(prev => prev.map(el => el.id === selectedElementId ? { ...el, ...updates } : el));
+  const exportPNG = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    renderCanvas(false);
+    const link = document.createElement('a');
+    link.download = `canvas-${Date.now()}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    renderCanvas(true);
   };
 
-  const selectedElement = elements.find(el => el.id === selectedElementId);
+  const selectedElement = elements.find((el) => el.id === selectedId);
 
   return (
-    <div className="tool-panel">
-      <div className="mb-6 md:mb-12 flex flex-col md:flex-row justify-between items-start md:items-end gap-4 md:gap-6">
-        <div>
-          <h2 className="text-3xl md:text-5xl font-black tracking-tighter uppercase italic">Onyx <span className="text-purple-500">Paint Pro</span></h2>
-          <p className="text-slate-500 text-xs md:text-sm font-medium tracking-wide">Professional Canvas Manipulation Engine.</p>
-        </div>
-        <div className="flex flex-wrap gap-2 md:gap-3 w-full md:w-auto">
-          <button onClick={() => setElements(elements.slice(0, -1))} className="flex-1 md:w-12 h-10 md:h-12 bg-white/5 rounded-xl border border-white/10 text-slate-400 hover:text-white transition-all active:scale-95"><i className="fas fa-undo"></i></button>
-          <button onClick={() => { if(confirm('Delete all artwork?')) setElements([]); }} className="flex-1 md:w-12 h-10 md:h-12 bg-white/5 rounded-xl border border-white/10 text-slate-400 hover:text-red-500 transition-all active:scale-95"><i className="fas fa-trash"></i></button>
-          <button onClick={() => {
-            const canvas = canvasRef.current;
-            if(!canvas) return;
-            const link = document.createElement('a');
-            link.download = `onyx-design-${Date.now()}.png`;
-            link.href = canvas.toDataURL('image/png');
-            link.click();
-          }} className="flex-[2] md:flex-none bg-purple-600 text-white text-[10px] font-black uppercase tracking-[0.1em] md:tracking-[0.2em] px-4 md:px-10 py-3 md:py-4 rounded-xl shadow-2xl active:scale-95 transition-transform">Export Image</button>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-zinc-800">
+        <h1 className="text-base font-semibold text-white">Paint</h1>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={undo}
+            disabled={historyIndex <= 0}
+            className="px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 disabled:opacity-30"
+          >
+            Undo
+          </button>
+          <button
+            onClick={redo}
+            disabled={historyIndex >= history.length - 1}
+            className="px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 disabled:opacity-30"
+          >
+            Redo
+          </button>
+          <button
+            onClick={() => {
+              commitElements([]);
+              setSelectedId(null);
+            }}
+            className="px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-400 hover:text-red-400"
+          >
+            Clear
+          </button>
+          <button
+            onClick={exportPNG}
+            className="px-3.5 py-1.5 rounded bg-white hover:bg-zinc-200 text-black text-xs font-semibold"
+          >
+            Export PNG
+          </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 md:gap-8 items-start">
-        <div className="lg:col-span-1 glass-card p-2 rounded-xl md:rounded-2xl bg-black/40 border-white/10 flex flex-row lg:flex-col gap-2 overflow-x-auto lg:overflow-visible sticky top-0 z-20 no-scrollbar">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        {/* Tools */}
+        <div className="lg:col-span-1 studio-panel rounded-lg p-1.5 flex flex-row lg:flex-col gap-1 overflow-x-auto no-scrollbar">
           {[
-            { id: 'select', icon: 'fa-mouse-pointer', label: 'Select' },
-            { id: 'brush', icon: 'fa-paint-brush', label: 'Brush' },
-            { id: 'line', icon: 'fa-slash', label: 'Line' },
-            { id: 'rect', icon: 'fa-square', label: 'Box' },
-            { id: 'circle', icon: 'fa-circle', label: 'Circle' },
+            { id: 'select', icon: 'fa-arrow-pointer', label: 'Select' },
+            { id: 'brush', icon: 'fa-paintbrush', label: 'Brush' },
+            { id: 'highlighter', icon: 'fa-highlighter', label: 'Marker' },
+            { id: 'line', icon: 'fa-minus', label: 'Line' },
+            { id: 'arrow', icon: 'fa-arrow-up-right-from-square', label: 'Arrow' },
+            { id: 'rect', icon: 'fa-vector-square', label: 'Rect' },
+            { id: 'circle', icon: 'fa-circle-dot', label: 'Circle' },
+            { id: 'polygon', icon: 'fa-play', label: 'Triangle' },
+            { id: 'text', icon: 'fa-font', label: 'Text' },
+            { id: 'eyedropper', icon: 'fa-eye-dropper', label: 'Picker' },
             { id: 'eraser', icon: 'fa-eraser', label: 'Eraser' },
-            { id: 'text', icon: 'fa-font', label: 'Text' }
-          ].map(tool => (
+          ].map((tool) => (
             <button
               key={tool.id}
-              onClick={() => { setActiveTool(tool.id as PaintTool); if(tool.id !== 'select') setSelectedElementId(null); }}
-              className={`w-10 h-10 md:w-12 md:h-12 flex-shrink-0 rounded-xl flex items-center justify-center transition-all ${activeTool === tool.id ? 'bg-purple-600 text-white shadow-lg' : 'text-slate-500 hover:bg-white/5 active:bg-white/10'}`}
+              onClick={() => {
+                setActiveTool(tool.id as PaintTool);
+                if (tool.id !== 'select') setSelectedId(null);
+              }}
+              className={`w-9 h-9 lg:w-full flex-shrink-0 rounded flex items-center justify-center ${
+                activeTool === tool.id
+                  ? 'bg-white text-black'
+                  : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+              }`}
               title={tool.label}
             >
-              <i className={`fas ${tool.icon} text-base md:text-lg`}></i>
+              <i className={`fas ${tool.icon} text-xs`}></i>
             </button>
           ))}
-          <div className="lg:h-px lg:w-full w-px h-6 md:h-8 bg-white/10 my-1 mx-2 lg:mx-0" />
-          <label className="w-10 h-10 md:w-12 md:h-12 flex-shrink-0 rounded-xl flex items-center justify-center text-slate-500 hover:bg-white/5 active:bg-white/10 cursor-pointer" title="Import Image">
-            <i className="fas fa-image text-base md:text-lg"></i>
-            <input type="file" className="hidden" accept="image/*" onChange={handleImageImport} />
-          </label>
         </div>
 
-        <div className="lg:col-span-8 glass-card rounded-2xl md:rounded-[40px] overflow-hidden relative aspect-video bg-[#050505] border-white/10 shadow-2xl touch-none">
-           <canvas
-             ref={canvasRef}
-             width={canvasSize.width}
-             height={canvasSize.height}
-             onMouseDown={handleStart}
-             onMouseMove={handleMove}
-             onMouseUp={handleEnd}
-             onTouchStart={handleStart}
-             onTouchMove={handleMove}
-             onTouchEnd={handleEnd}
-             className={`w-full h-full ${activeTool === 'select' ? 'cursor-move' : 'cursor-crosshair'}`}
-           />
-           <div className="absolute bottom-4 right-4 px-2 py-1 bg-black/80 backdrop-blur-md rounded-lg border border-white/10 text-[7px] md:text-[8px] font-black uppercase text-slate-500 tracking-widest">
-             {canvasSize.width}x{canvasSize.height} PX
-           </div>
+        {/* Canvas */}
+        <div className="lg:col-span-8 studio-panel rounded-lg overflow-hidden checkerboard touch-none">
+          <canvas
+            ref={canvasRef}
+            width={canvasSize.width}
+            height={canvasSize.height}
+            onMouseDown={handleStart}
+            onMouseMove={handleMove}
+            onMouseUp={handleEnd}
+            onTouchStart={handleStart}
+            onTouchMove={handleMove}
+            onTouchEnd={handleEnd}
+            className={`w-full h-auto block ${
+              activeTool === 'select' ? 'cursor-move' : 'cursor-crosshair'
+            }`}
+          />
         </div>
 
-        <div className="lg:col-span-3 space-y-4 md:space-y-6">
-           <div className="glass-card p-6 md:p-7 rounded-2xl md:rounded-[40px] space-y-6 md:space-y-8 bg-black/40 border-white/10 flex flex-col min-w-0">
-              <div className="space-y-3 md:space-y-4 min-w-0">
-                 <label className="text-[9px] md:text-[10px] font-black text-slate-500 uppercase tracking-widest block">Main Tint</label>
-                 <div className="flex gap-2 md:gap-3 items-center min-w-0">
-                    <input 
-                      type="color" 
-                      value={selectedElement?.color1 || color1} 
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setColor1(val);
-                        updateSelectedElement({ color1: val });
-                      }} 
-                    />
-                    <div className="flex-1 min-w-0 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 md:py-3 font-mono text-[10px] md:text-[11px] text-slate-400 truncate uppercase">
-                      {(selectedElement?.color1 || color1)}
-                    </div>
-                 </div>
-              </div>
-
-              {selectedElement?.type === 'text' && (
-                <div className="space-y-3 md:space-y-4 animate-slideIn min-w-0">
-                   <label className="text-[9px] md:text-[10px] font-black text-purple-400 uppercase tracking-widest block">Edit Content</label>
-                   <textarea 
-                    value={selectedElement.text}
-                    onChange={(e) => updateSelectedElement({ text: e.target.value })}
-                    className="w-full bg-white/5 border border-purple-500/30 rounded-xl p-3 md:p-4 text-[10px] md:text-[11px] text-white focus:outline-none focus:border-purple-500 resize-none h-24 md:h-28"
-                    placeholder="Content..."
-                   />
-                </div>
-              )}
-
-              <div className="space-y-3 md:space-y-4 min-w-0">
-                 <div className="flex justify-between items-center text-[9px] md:text-[10px] font-black text-slate-500 uppercase tracking-widest">
-                    <span>Size / Stroke</span>
-                    <span className="text-purple-400 font-bold">{selectedElement?.brushSize || brushSize}px</span>
-                 </div>
-                 <input 
-                  type="range" min="1" max="250" 
-                  value={selectedElement?.brushSize || brushSize} 
-                  onChange={(e) => {
-                    const val = parseInt(e.target.value);
-                    setBrushSize(val);
-                    updateSelectedElement({ brushSize: val });
-                  }} 
-                  className="w-full" 
-                 />
-              </div>
-
-              {selectedElementId && (
-                <div className="pt-4 md:pt-6 border-t border-white/10 animate-fadeIn min-w-0">
-                   <button 
-                    onClick={() => {
-                      setElements(elements.filter(el => el.id !== selectedElementId));
-                      setSelectedElementId(null);
+        {/* Minimal Inspector */}
+        <div className="lg:col-span-3 space-y-3">
+          <div className="studio-panel rounded-lg p-3.5 space-y-3.5">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[10px] font-mono uppercase text-zinc-500 mb-1">Stroke</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={selectedElement?.strokeColor || strokeColor}
+                    onChange={(e) => {
+                      setStrokeColor(e.target.value);
+                      updateSelected({ strokeColor: e.target.value });
                     }}
-                    className="w-full py-3 md:py-4 bg-red-500/10 border border-red-500/20 text-red-500 text-[9px] md:text-[10px] font-black uppercase tracking-widest rounded-xl md:rounded-2xl hover:bg-red-500 hover:text-white transition-all shadow-xl active:scale-95"
-                   >
-                     Delete Element
-                   </button>
+                    className="w-7 h-7 rounded"
+                  />
+                  <span className="font-mono text-xs text-zinc-300">
+                    {selectedElement?.strokeColor || strokeColor}
+                  </span>
                 </div>
-              )}
-           </div>
+              </div>
 
-           <div className="glass-card p-4 md:p-6 rounded-2xl md:rounded-3xl bg-purple-600/5 border border-purple-500/10">
-              <p className="text-[10px] text-slate-600 leading-relaxed font-medium italic">
-                <i className="fas fa-magic text-purple-500 mr-2"></i>
-                Every object is an independent layer. Use the "Select" tool to move them.
-              </p>
-           </div>
+              <div>
+                <label className="block text-[10px] font-mono uppercase text-zinc-500 mb-1">Fill</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={selectedElement?.fillColor || fillColor}
+                    onChange={(e) => {
+                      setFillColor(e.target.value);
+                      updateSelected({ fillColor: e.target.value });
+                    }}
+                    className="w-7 h-7 rounded"
+                  />
+                  <button
+                    onClick={() => {
+                      const next = !(selectedElement ? selectedElement.filled : filled);
+                      setFilled(next);
+                      updateSelected({ filled: next });
+                    }}
+                    className={`px-2 py-1 rounded text-[10px] font-mono border ${
+                      (selectedElement ? selectedElement.filled : filled)
+                        ? 'bg-white text-black border-white font-semibold'
+                        : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                    }`}
+                  >
+                    {(selectedElement ? selectedElement.filled : filled) ? 'ON' : 'OFF'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-400">Size</span>
+                <span className="font-mono text-zinc-200">{selectedElement?.strokeWidth || strokeWidth}px</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="120"
+                value={selectedElement?.strokeWidth || strokeWidth}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value);
+                  setStrokeWidth(v);
+                  updateSelected({ strokeWidth: v });
+                }}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-400">Opacity</span>
+                <span className="font-mono text-zinc-200">{selectedElement?.opacity ?? opacity}%</span>
+              </div>
+              <input
+                type="range"
+                min="10"
+                max="100"
+                value={selectedElement?.opacity ?? opacity}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value);
+                  setOpacity(v);
+                  updateSelected({ opacity: v });
+                }}
+              />
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-mono uppercase text-zinc-500 mb-1">Canvas</label>
+              <div className="grid grid-cols-4 gap-1">
+                {(
+                  [
+                    { id: '#09090b', label: 'Dark' },
+                    { id: '#000000', label: 'Black' },
+                    { id: '#ffffff', label: 'White' },
+                    { id: 'transparent', label: 'Alpha' },
+                  ] as const
+                ).map((bg) => (
+                  <button
+                    key={bg.id}
+                    onClick={() => setBgColor(bg.id)}
+                    className={`py-1 rounded text-[10px] font-mono border ${
+                      bgColor === bg.id
+                        ? 'bg-white text-black border-white font-semibold'
+                        : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                    }`}
+                  >
+                    {bg.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {selectedElement?.type === 'text' && (
+              <input
+                type="text"
+                value={selectedElement.text || ''}
+                onChange={(e) => updateSelected({ text: e.target.value })}
+                className="w-full bg-zinc-900 border border-zinc-700 rounded p-2 text-xs text-white focus:outline-none"
+                placeholder="Text..."
+              />
+            )}
+          </div>
+
+          {elements.length > 0 && (
+            <div className="studio-panel rounded-lg p-3 space-y-1.5 max-h-48 overflow-y-auto custom-scrollbar">
+              {[...elements].reverse().map((el) => (
+                <div
+                  key={el.id}
+                  onClick={() => {
+                    setSelectedId(el.id);
+                    setActiveTool('select');
+                  }}
+                  className={`flex items-center justify-between px-2 py-1 rounded text-xs cursor-pointer ${
+                    selectedId === el.id ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:bg-zinc-900'
+                  }`}
+                >
+                  <span className="truncate font-mono text-[11px]">{el.name}</span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      commitElements(elements.filter((item) => item.id !== el.id));
+                      if (selectedId === el.id) setSelectedId(null);
+                    }}
+                    className="text-zinc-500 hover:text-red-400 px-1"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

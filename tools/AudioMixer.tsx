@@ -1,232 +1,501 @@
-
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 interface AudioTrack {
   id: string;
   name: string;
   buffer: AudioBuffer;
+  peaks: number[];
   volume: number;
   pitch: number;
   bass: number;
   mid: number;
   treble: number;
+  lowpass: number;
   pan: number;
   isMuted: boolean;
   isSoloed: boolean;
 }
 
+interface TrackNodes {
+  source: AudioBufferSourceNode;
+  gain: GainNode;
+  bass: BiquadFilterNode;
+  mid: BiquadFilterNode;
+  treble: BiquadFilterNode;
+  lowpass: BiquadFilterNode;
+  panner: StereoPannerNode;
+}
+
+const extractPeaks = (buffer: AudioBuffer, count = 100): number[] => {
+  const data = buffer.getChannelData(0);
+  const step = Math.max(1, Math.floor(data.length / count));
+  const peaks: number[] = [];
+  for (let i = 0; i < count; i++) {
+    let max = 0;
+    const start = i * step;
+    for (let j = 0; j < step && start + j < data.length; j += 8) {
+      const v = Math.abs(data[start + j]);
+      if (v > max) max = v;
+    }
+    peaks.push(Math.min(1, max));
+  }
+  return peaks;
+};
+
+const encodeWav = (buffer: AudioBuffer): Blob => {
+  const numCh = buffer.numberOfChannels;
+  const len = buffer.length * numCh * 2 + 44;
+  const out = new ArrayBuffer(len);
+  const view = new DataView(out);
+  let pos = 0;
+  const u16 = (d: number) => { view.setUint16(pos, d, true); pos += 2; };
+  const u32 = (d: number) => { view.setUint32(pos, d, true); pos += 4; };
+
+  u32(0x46464952); u32(len - 8); u32(0x45564157);
+  u32(0x20746d66); u32(16); u16(1); u16(numCh);
+  u32(buffer.sampleRate); u32(buffer.sampleRate * 2 * numCh);
+  u16(numCh * 2); u16(16); u32(0x61746164); u32(len - 44);
+
+  const chs = Array.from({ length: numCh }, (_, i) => buffer.getChannelData(i));
+  for (let i = 0; i < buffer.length; i++) {
+    for (let c = 0; c < numCh; c++) {
+      const s = Math.max(-1, Math.min(1, chs[c][i]));
+      view.setInt16(pos, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      pos += 2;
+    }
+  }
+  return new Blob([out], { type: 'audio/wav' });
+};
+
 const AudioMixer: React.FC = () => {
   const [tracks, setTracks] = useState<AudioTrack[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [masterVolume, setMasterVolume] = useState(0.8);
+  const [isLooping, setIsLooping] = useState(true);
+  const [masterVolume, setMasterVolume] = useState(0.85);
+  const [currentTime, setCurrentTime] = useState(0);
+
   const audioCtx = useRef<AudioContext | null>(null);
-  const sources = useRef<Map<string, AudioBufferSourceNode>>(new Map());
-  const nodes = useRef<Map<string, { gain: GainNode; bass: BiquadFilterNode; mid: BiquadFilterNode; treble: BiquadFilterNode; panner: StereoPannerNode; analyser: AnalyserNode }>>(new Map());
+  const trackNodes = useRef<Map<string, TrackNodes>>(new Map());
   const masterGain = useRef<GainNode | null>(null);
+  const startTimeRef = useRef<number>(0);
+  const pauseOffsetRef = useRef<number>(0);
+  const rafRef = useRef<number>(0);
+
+  const maxDuration = tracks.reduce((m, t) => Math.max(m, t.buffer.duration), 0);
 
   const initAudio = () => {
     if (!audioCtx.current) {
-      audioCtx.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      masterGain.current = audioCtx.current.createGain();
+      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioCtx.current = ctx;
+      masterGain.current = ctx.createGain();
       masterGain.current.gain.value = masterVolume;
-      masterGain.current.connect(audioCtx.current.destination);
+      masterGain.current.connect(ctx.destination);
     }
+    if (audioCtx.current.state === 'suspended') audioCtx.current.resume();
   };
 
-  const loadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
-    initAudio();
-    const newTracks: AudioTrack[] = [...tracks];
-    for (const file of Array.from(files)) {
-      try {
-        const buffer = await audioCtx.current!.decodeAudioData(await file.arrayBuffer());
-        newTracks.push({
-          id: Math.random().toString(36).substr(2, 9),
-          name: file.name,
-          buffer,
-          volume: 0.7, pitch: 1.0, bass: 0, mid: 0, treble: 0, pan: 0,
-          isMuted: false, isSoloed: false
-        });
-      } catch (err) {}
-    }
-    setTracks(newTracks);
-  };
-
-  const playAll = () => {
-    initAudio();
-    stopAll();
-    tracks.forEach(track => {
-      const source = audioCtx.current!.createBufferSource();
-      source.buffer = track.buffer;
-      source.loop = true;
-      const gain = audioCtx.current!.createGain();
-      const bass = audioCtx.current!.createBiquadFilter();
-      bass.type = 'lowshelf'; bass.frequency.value = 80;
-      const mid = audioCtx.current!.createBiquadFilter();
-      mid.type = 'peaking'; mid.frequency.value = 1000;
-      const treb = audioCtx.current!.createBiquadFilter();
-      treb.type = 'highshelf'; treb.frequency.value = 10000;
-      const pan = audioCtx.current!.createStereoPanner();
-      const ana = audioCtx.current!.createAnalyser();
-
-      source.connect(bass);
-      bass.connect(mid);
-      mid.connect(treb);
-      treb.connect(gain);
-      gain.connect(pan);
-      pan.connect(ana);
-      ana.connect(masterGain.current!);
-
-      source.start(0);
-      sources.current.set(track.id, source);
-      nodes.current.set(track.id, { gain, bass, mid, treble: treb, panner: pan, analyser: ana });
+  const stopNodes = () => {
+    trackNodes.current.forEach((n) => {
+      try { n.source.stop(); n.source.disconnect(); } catch {}
     });
-    setIsPlaying(true);
-    updateNodes();
+    trackNodes.current.clear();
+    cancelAnimationFrame(rafRef.current);
+  };
+
+  const startFromOffset = useCallback(
+    (offsetSec: number) => {
+      if (tracks.length === 0) return;
+      initAudio();
+      stopNodes();
+      const ctx = audioCtx.current!;
+      const hasSolo = tracks.some((t) => t.isSoloed);
+
+      tracks.forEach((track) => {
+        const source = ctx.createBufferSource();
+        source.buffer = track.buffer;
+        source.loop = isLooping;
+        source.playbackRate.value = track.pitch;
+
+        const bass = ctx.createBiquadFilter();
+        bass.type = 'lowshelf'; bass.frequency.value = 80; bass.gain.value = track.bass;
+
+        const mid = ctx.createBiquadFilter();
+        mid.type = 'peaking'; mid.frequency.value = 1000; mid.gain.value = track.mid;
+
+        const treble = ctx.createBiquadFilter();
+        treble.type = 'highshelf'; treble.frequency.value = 10000; treble.gain.value = track.treble;
+
+        const lowpass = ctx.createBiquadFilter();
+        lowpass.type = 'lowpass'; lowpass.frequency.value = track.lowpass;
+
+        const gain = ctx.createGain();
+        gain.gain.value = track.isMuted || (hasSolo && !track.isSoloed) ? 0 : track.volume;
+
+        const panner = ctx.createStereoPanner();
+        panner.pan.value = track.pan;
+
+        source.connect(bass);
+        bass.connect(mid);
+        mid.connect(treble);
+        treble.connect(lowpass);
+        lowpass.connect(gain);
+        gain.connect(panner);
+        panner.connect(masterGain.current!);
+
+        source.start(0, track.buffer.duration > 0 ? offsetSec % track.buffer.duration : 0);
+        trackNodes.current.set(track.id, { source, gain, bass, mid, treble, lowpass, panner });
+      });
+
+      startTimeRef.current = ctx.currentTime - offsetSec;
+      setIsPlaying(true);
+    },
+    [tracks, isLooping]
+  );
+
+  const togglePlay = () => {
+    if (tracks.length === 0) return;
+    if (isPlaying) {
+      if (audioCtx.current) pauseOffsetRef.current = audioCtx.current.currentTime - startTimeRef.current;
+      stopNodes();
+      setIsPlaying(false);
+    } else {
+      startFromOffset(pauseOffsetRef.current);
+    }
   };
 
   const stopAll = () => {
-    sources.current.forEach(s => s.stop());
-    sources.current.clear();
-    nodes.current.clear();
+    stopNodes();
+    pauseOffsetRef.current = 0;
+    setCurrentTime(0);
     setIsPlaying(false);
   };
 
-  const updateNodes = () => {
-    const hasSolo = tracks.some(t => t.isSoloed);
-    tracks.forEach(t => {
-      const n = nodes.current.get(t.id);
+  const seekTo = (t: number) => {
+    pauseOffsetRef.current = t;
+    setCurrentTime(t);
+    if (isPlaying) startFromOffset(t);
+  };
+
+  useEffect(() => {
+    if (!audioCtx.current) return;
+    const ctx = audioCtx.current;
+    if (masterGain.current) masterGain.current.gain.setTargetAtTime(masterVolume, ctx.currentTime, 0.03);
+    const hasSolo = tracks.some((t) => t.isSoloed);
+    tracks.forEach((t) => {
+      const n = trackNodes.current.get(t.id);
       if (n) {
-        const shouldMute = t.isMuted || (hasSolo && !t.isSoloed);
-        n.gain.gain.setTargetAtTime(shouldMute ? 0 : t.volume, audioCtx.current!.currentTime, 0.05);
-        n.bass.gain.setTargetAtTime(t.bass, audioCtx.current!.currentTime, 0.05);
-        n.mid.gain.setTargetAtTime(t.mid, audioCtx.current!.currentTime, 0.05);
-        n.treble.gain.setTargetAtTime(t.treble, audioCtx.current!.currentTime, 0.05);
-        n.panner.pan.setTargetAtTime(t.pan, audioCtx.current!.currentTime, 0.05);
+        n.gain.gain.setTargetAtTime(t.isMuted || (hasSolo && !t.isSoloed) ? 0 : t.volume, ctx.currentTime, 0.03);
+        n.source.playbackRate.setTargetAtTime(t.pitch, ctx.currentTime, 0.03);
+        n.bass.gain.setTargetAtTime(t.bass, ctx.currentTime, 0.03);
+        n.mid.gain.setTargetAtTime(t.mid, ctx.currentTime, 0.03);
+        n.treble.gain.setTargetAtTime(t.treble, ctx.currentTime, 0.03);
+        n.lowpass.frequency.setTargetAtTime(t.lowpass, ctx.currentTime, 0.03);
+        n.panner.pan.setTargetAtTime(t.pan, ctx.currentTime, 0.03);
       }
     });
-  };
+  }, [tracks, masterVolume]);
 
-  useEffect(() => { if (isPlaying) updateNodes(); }, [tracks]);
-
-  const drawVU = (trackId: string, canvas: HTMLCanvasElement) => {
-    const n = nodes.current.get(trackId);
-    if (!n || !canvas) return;
-    const ctx = canvas.getContext('2d')!;
-    const data = new Uint8Array(n.analyser.frequencyBinCount);
-    const r = () => {
-      if (!isPlaying) return;
-      n.analyser.getByteFrequencyData(data);
-      let sum = data.reduce((a, b) => a + b, 0) / data.length;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = sum > 80 ? '#ef4444' : '#a855f7';
-      ctx.fillRect(0, canvas.height - (sum/128)*canvas.height, canvas.width, canvas.height);
-      requestAnimationFrame(r);
+  useEffect(() => {
+    if (!isPlaying) return;
+    const tick = () => {
+      if (audioCtx.current && maxDuration > 0) {
+        const elapsed = audioCtx.current.currentTime - startTimeRef.current;
+        if (!isLooping && elapsed >= maxDuration) {
+          stopAll();
+          return;
+        }
+        setCurrentTime(isLooping ? elapsed % maxDuration : Math.min(maxDuration, elapsed));
+      }
+      rafRef.current = requestAnimationFrame(tick);
     };
-    r();
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [isPlaying, isLooping, maxDuration]);
+
+  useEffect(() => () => stopNodes(), []);
+
+  const loadFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    initAudio();
+    const added: AudioTrack[] = [];
+    for (const file of Array.from(files)) {
+      try {
+        const buf = await audioCtx.current!.decodeAudioData(await file.arrayBuffer());
+        added.push({
+          id: Math.random().toString(36).slice(2, 8),
+          name: file.name.replace(/\.[^/.]+$/, ''),
+          buffer: buf,
+          peaks: extractPeaks(buf),
+          volume: 0.8,
+          pitch: 1.0,
+          bass: 0,
+          mid: 0,
+          treble: 0,
+          lowpass: 20000,
+          pan: 0,
+          isMuted: false,
+          isSoloed: false,
+        });
+      } catch {}
+    }
+    if (added.length > 0) {
+      if (isPlaying) stopAll();
+      setTracks((prev) => [...prev, ...added]);
+    }
   };
+
+  const exportMixdown = async () => {
+    if (tracks.length === 0 || maxDuration === 0) return;
+    const sr = 44100;
+    const offline = new OfflineAudioContext(2, Math.ceil(maxDuration * sr), sr);
+    const outMaster = offline.createGain();
+    outMaster.gain.value = masterVolume;
+    outMaster.connect(offline.destination);
+
+    const hasSolo = tracks.some((t) => t.isSoloed);
+    tracks.forEach((t) => {
+      if (t.isMuted || (hasSolo && !t.isSoloed)) return;
+      const src = offline.createBufferSource();
+      src.buffer = t.buffer;
+      src.playbackRate.value = t.pitch;
+      const bass = offline.createBiquadFilter(); bass.type = 'lowshelf'; bass.frequency.value = 80; bass.gain.value = t.bass;
+      const mid = offline.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 1000; mid.gain.value = t.mid;
+      const treb = offline.createBiquadFilter(); treb.type = 'highshelf'; treb.frequency.value = 10000; treb.gain.value = t.treble;
+      const lpf = offline.createBiquadFilter(); lpf.type = 'lowpass'; lpf.frequency.value = t.lowpass;
+      const gain = offline.createGain(); gain.gain.value = t.volume;
+      const pan = offline.createStereoPanner(); pan.pan.value = t.pan;
+
+      src.connect(bass); bass.connect(mid); mid.connect(treb); treb.connect(lpf); lpf.connect(gain); gain.connect(pan); pan.connect(outMaster);
+      src.start(0);
+    });
+
+    const rendered = await offline.startRendering();
+    const link = document.createElement('a');
+    link.download = `mixdown-${Date.now()}.wav`;
+    link.href = URL.createObjectURL(encodeWav(rendered));
+    link.click();
+  };
+
+  const updateTrack = (id: string, patch: Partial<AudioTrack>) => {
+    setTracks((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  };
+
+  const fmtTime = (s: number) =>
+    `${Math.floor(s / 60).toString().padStart(2, '0')}:${Math.floor(s % 60).toString().padStart(2, '0')}.${Math.floor((s % 1) * 10)}`;
 
   return (
-    <div className="tool-panel">
-      <div className="mb-12 flex flex-col md:flex-row justify-between items-end gap-6">
-        <div>
-          <h2 className="text-5xl font-black tracking-tighter uppercase italic">Audio <span className="text-purple-500">Mixer</span></h2>
-          <p className="text-slate-500 font-medium tracking-wide">Professional Multi-Track DAW Environment.</p>
-        </div>
-        <div className="flex gap-4">
-          <button onClick={isPlaying ? stopAll : playAll} className={`px-12 py-4 rounded-xl font-black text-[10px] uppercase tracking-[0.2em] transition-all shadow-2xl ${isPlaying ? 'bg-red-500 shadow-red-900/40 text-white' : 'bg-white text-black'}`}>
-            <i className={`fas ${isPlaying ? 'fa-stop' : 'fa-play'} mr-3`}></i>{isPlaying ? 'Stop' : 'Start Session'}
-          </button>
-          <label className="bg-purple-600 text-white text-[10px] font-black uppercase tracking-[0.2em] px-10 py-4 rounded-xl cursor-pointer shadow-xl shadow-purple-900/40">
-            <i className="fas fa-plus mr-2"></i> Import Stems
-            <input type="file" multiple accept="audio/*" onChange={loadFile} className="hidden" />
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-zinc-800">
+        <h1 className="text-base font-semibold text-white">Audio Mixer</h1>
+        <div className="flex items-center gap-2">
+          <label className="px-3 py-1.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs text-zinc-200 cursor-pointer">
+            Import Stems
+            <input type="file" multiple accept="audio/*" onChange={loadFiles} className="hidden" />
           </label>
+          {tracks.length > 0 && (
+            <button
+              onClick={exportMixdown}
+              className="px-3.5 py-1.5 rounded bg-white hover:bg-zinc-200 text-black text-xs font-semibold"
+            >
+              Export WAV
+            </button>
+          )}
         </div>
       </div>
 
-      <div className="space-y-6">
-        {tracks.length === 0 ? (
-          <div className="glass-card p-32 rounded-[40px] text-center bg-white/[0.01] border-dashed border-white/10 flex flex-col items-center">
-            <div className="w-24 h-24 bg-white/5 rounded-full flex items-center justify-center mb-8 border border-white/10">
-              <i className="fas fa-music text-slate-700 text-4xl"></i>
-            </div>
-            <p className="text-slate-600 font-black text-[10px] uppercase tracking-[0.4em]">No tracks loaded. Import audio stems.</p>
-          </div>
-        ) : (
-          tracks.map(t => (
-            <div key={t.id} className="glass-card p-8 rounded-[32px] bg-black/40 border-white/10 flex flex-col lg:flex-row gap-10 items-center">
-              <div className="w-full lg:w-56 space-y-4">
-                <div className="text-white font-black text-xs truncate uppercase tracking-tighter leading-tight bg-white/5 p-3 rounded-lg border border-white/5">
-                  {t.name}
-                </div>
-                <div className="flex gap-2">
-                  <button 
-                    onClick={() => setTracks(prev => prev.map(tr => tr.id === t.id ? {...tr, isMuted: !tr.isMuted} : tr))} 
-                    className={`flex-1 py-3 rounded-xl text-[9px] font-black border transition-all ${t.isMuted ? 'bg-red-500 border-red-400 text-white' : 'bg-white/5 border-white/10 text-slate-500'}`}
-                  >
-                    MUTE
-                  </button>
-                  <button 
-                    onClick={() => setTracks(prev => prev.map(tr => tr.id === t.id ? {...tr, isSoloed: !tr.isSoloed} : tr))} 
-                    className={`flex-1 py-3 rounded-xl text-[9px] font-black border transition-all ${t.isSoloed ? 'bg-amber-500 border-amber-400 text-black' : 'bg-white/5 border-white/10 text-slate-500'}`}
-                  >
-                    SOLO
-                  </button>
-                </div>
-              </div>
+      {/* Transport Bar */}
+      <div className="studio-panel rounded-lg p-3 flex flex-wrap items-center gap-4">
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={togglePlay}
+            disabled={tracks.length === 0}
+            className={`px-3.5 py-1.5 rounded text-xs font-semibold disabled:opacity-30 ${
+              isPlaying ? 'bg-[#ff4f00] text-black' : 'bg-white text-black'
+            }`}
+          >
+            {isPlaying ? 'Pause' : 'Play'}
+          </button>
+          <button
+            onClick={stopAll}
+            disabled={tracks.length === 0}
+            className="px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 disabled:opacity-30"
+          >
+            Stop
+          </button>
+          <button
+            onClick={() => setIsLooping(!isLooping)}
+            className={`px-2.5 py-1.5 rounded border text-xs font-mono ${
+              isLooping ? 'bg-zinc-800 text-white border-zinc-600' : 'bg-zinc-900 text-zinc-500 border-zinc-800'
+            }`}
+          >
+            Loop
+          </button>
+        </div>
 
-              <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-8 w-full">
-                <div className="space-y-3">
-                  <div className="flex justify-between text-[9px] font-black text-slate-600 uppercase tracking-widest">
-                    <span>Volume</span>
-                    <span className="text-purple-400">{Math.round(t.volume * 100)}%</span>
-                  </div>
-                  <input type="range" min="0" max="1.5" step="0.01" value={t.volume} onChange={(e) => setTracks(prev => prev.map(tr => tr.id === t.id ? {...tr, volume: parseFloat(e.target.value)} : tr))} className="w-full" />
-                </div>
-                <div className="space-y-3">
-                  <div className="flex justify-between text-[9px] font-black text-slate-600 uppercase tracking-widest">
-                    <span>Panning</span>
-                    <span className="text-purple-400">{t.pan < 0 ? 'L' : t.pan > 0 ? 'R' : 'C'}</span>
-                  </div>
-                  <input type="range" min="-1" max="1" step="0.01" value={t.pan} onChange={(e) => setTracks(prev => prev.map(tr => tr.id === t.id ? {...tr, pan: parseFloat(e.target.value)} : tr))} className="w-full" />
-                </div>
-                <div className="space-y-3">
-                   <div className="flex justify-between text-[9px] font-black text-slate-600 uppercase tracking-widest">
-                     <span>Pitch</span>
-                     <span className="text-purple-400">x{t.pitch}</span>
-                   </div>
-                   <input type="range" min="0.5" max="2" step="0.01" value={t.pitch} onChange={(e) => setTracks(prev => prev.map(tr => tr.id === t.id ? {...tr, pitch: parseFloat(e.target.value)} : tr))} className="w-full" />
-                </div>
-              </div>
+        <span className="font-mono text-xs text-zinc-300">
+          {fmtTime(currentTime)} / {fmtTime(maxDuration)}
+        </span>
 
-              <div className="flex gap-4 h-36 items-center bg-black/60 p-5 rounded-2xl border border-white/5">
-                 {['bass', 'mid', 'treble'].map(eq => (
-                   <div key={eq} className="flex flex-col items-center justify-between h-full w-10">
-                      <span className="text-[7px] font-black text-slate-700 uppercase tracking-widest">{eq}</span>
-                      <div className="eq-slider-container">
-                        <input 
-                          type="range" min="-24" max="24" 
-                          value={t[eq as keyof AudioTrack] as number}
-                          onChange={(e) => setTracks(prev => prev.map(tr => tr.id === t.id ? {...tr, [eq]: parseInt(e.target.value)} : tr))}
-                          className="eq-slider"
-                        />
-                      </div>
-                      <span className="text-[8px] font-mono text-purple-400/60">{t[eq as keyof AudioTrack] as number}</span>
-                   </div>
-                 ))}
-              </div>
+        <div className="flex-1 min-w-[140px]">
+          <input
+            type="range"
+            min="0"
+            max={maxDuration || 1}
+            step="0.05"
+            value={currentTime}
+            disabled={tracks.length === 0}
+            onChange={(e) => seekTo(parseFloat(e.target.value))}
+          />
+        </div>
 
-              <div className="flex items-center gap-6">
-                <canvas className="w-14 h-32 bg-black/40 rounded-xl border border-white/5 shadow-inner" ref={el => { if(el && isPlaying) drawVU(t.id, el); }} />
-                <button onClick={() => setTracks(prev => prev.filter(tr => tr.id !== t.id))} className="w-12 h-12 flex items-center justify-center rounded-xl bg-red-500/5 text-slate-800 hover:text-red-500 hover:bg-red-500/10 transition-all border border-transparent hover:border-red-500/20">
-                  <i className="fas fa-trash"></i>
-                </button>
-              </div>
-            </div>
-          ))
-        )}
+        <div className="flex items-center gap-2 w-36">
+          <span className="text-[10px] font-mono text-zinc-500">MASTER</span>
+          <input
+            type="range"
+            min="0"
+            max="1.2"
+            step="0.01"
+            value={masterVolume}
+            onChange={(e) => setMasterVolume(parseFloat(e.target.value))}
+          />
+        </div>
       </div>
+
+      {/* Tracks */}
+      {tracks.length === 0 ? (
+        <label className="studio-panel rounded-lg p-12 flex flex-col items-center justify-center text-center cursor-pointer text-xs text-zinc-500 hover:text-zinc-300">
+          <i className="fas fa-plus text-lg mb-2"></i>
+          <span>Click to import audio stems (WAV, MP3, OGG, FLAC)</span>
+          <input type="file" multiple accept="audio/*" onChange={loadFiles} className="hidden" />
+        </label>
+      ) : (
+        <div className="space-y-2.5">
+          {tracks.map((t) => {
+            const pct = t.buffer.duration > 0 ? ((currentTime % t.buffer.duration) / t.buffer.duration) * 100 : 0;
+            return (
+              <div key={t.id} className="studio-panel rounded-lg p-3.5 grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
+                <div className="lg:col-span-4 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-xs text-white truncate">{t.name}</span>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => updateTrack(t.id, { isMuted: !t.isMuted })}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                          t.isMuted ? 'bg-red-500 text-black border-red-400 font-bold' : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                        }`}
+                      >
+                        M
+                      </button>
+                      <button
+                        onClick={() => updateTrack(t.id, { isSoloed: !t.isSoloed })}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                          t.isSoloed ? 'bg-[#ff4f00] text-black border-[#ff4f00] font-bold' : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                        }`}
+                      >
+                        S
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (isPlaying) stopAll();
+                          setTracks((prev) => prev.filter((tr) => tr.id !== t.id));
+                        }}
+                        className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-500 hover:text-red-400 text-[10px]"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+
+                  <div
+                    onClick={(e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      seekTo(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * t.buffer.duration);
+                    }}
+                    className="h-10 bg-[#070708] border border-zinc-800 rounded relative flex items-center px-1 gap-[1px] cursor-pointer overflow-hidden"
+                  >
+                    {t.peaks.map((pk, idx) => (
+                      <div
+                        key={idx}
+                        style={{ height: `${Math.max(12, pk * 88)}%` }}
+                        className={`flex-1 ${t.isMuted ? 'bg-zinc-800' : 'bg-zinc-500'}`}
+                      />
+                    ))}
+                    <div style={{ left: `${pct}%` }} className="absolute inset-y-0 w-0.5 bg-[#ff4f00]" />
+                  </div>
+                </div>
+
+                <div className="lg:col-span-4 grid grid-cols-3 gap-3">
+                  <div>
+                    <div className="flex justify-between text-[10px] font-mono text-zinc-400 mb-1">
+                      <span>VOL</span>
+                      <span>{Math.round(t.volume * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1.5"
+                      step="0.01"
+                      value={t.volume}
+                      onChange={(e) => updateTrack(t.id, { volume: parseFloat(e.target.value) })}
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-[10px] font-mono text-zinc-400 mb-1">
+                      <span>PAN</span>
+                      <span>{t.pan === 0 ? 'C' : t.pan < 0 ? 'L' : 'R'}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="-1"
+                      max="1"
+                      step="0.02"
+                      value={t.pan}
+                      onChange={(e) => updateTrack(t.id, { pan: parseFloat(e.target.value) })}
+                    />
+                  </div>
+                  <div>
+                    <div className="flex justify-between text-[10px] font-mono text-zinc-400 mb-1">
+                      <span>SPEED</span>
+                      <span>{t.pitch.toFixed(2)}x</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="2"
+                      step="0.01"
+                      value={t.pitch}
+                      onChange={(e) => updateTrack(t.id, { pitch: parseFloat(e.target.value) })}
+                    />
+                  </div>
+                </div>
+
+                <div className="lg:col-span-4 grid grid-cols-4 gap-2.5">
+                  {[
+                    { k: 'bass', l: 'LOW', min: -18, max: 18 },
+                    { k: 'mid', l: 'MID', min: -18, max: 18 },
+                    { k: 'treble', l: 'HIGH', min: -18, max: 18 },
+                    { k: 'lowpass', l: 'CUT', min: 400, max: 20000 },
+                  ].map((eq) => (
+                    <div key={eq.k}>
+                      <div className="flex justify-between text-[10px] font-mono text-zinc-500 mb-1">
+                        <span>{eq.l}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={eq.min}
+                        max={eq.max}
+                        value={(t as any)[eq.k]}
+                        onChange={(e) => updateTrack(t.id, { [eq.k]: parseFloat(e.target.value) })}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

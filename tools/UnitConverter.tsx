@@ -1,106 +1,181 @@
+import React, { useState } from 'react';
 
-import React, { useState, useEffect } from 'react';
+interface UnitCategory {
+  label: string;
+  units: Record<string, { name: string; factor?: number }>;
+  custom?: (val: number, from: string, to: string) => number;
+}
 
-const UNITS: Record<string, { base: string; rates: Record<string, number> }> = {
-  length: { base: 'm', rates: { m: 1, km: 1000, cm: 0.01, mm: 0.001, in: 0.0254, ft: 0.3048, mi: 1609.34 } },
-  mass: { base: 'g', rates: { g: 1, kg: 1000, mg: 0.001, lb: 453.592, oz: 28.3495 } },
-  volume: { base: 'l', rates: { l: 1, ml: 0.001, gal: 3.78541, cup: 0.236588 } },
-  speed: { base: 'ms', rates: { ms: 1, kmh: 0.277778, mph: 0.44704, knot: 0.514444 } }
+const convertTemp = (v: number, from: string, to: string): number => {
+  if (from === to) return v;
+  let k = v;
+  if (from === 'C') k = v + 273.15;
+  else if (from === 'F') k = (v - 32) * (5 / 9) + 273.15;
+  if (to === 'K') return k;
+  if (to === 'C') return k - 273.15;
+  if (to === 'F') return (k - 273.15) * (9 / 5) + 32;
+  return k;
+};
+
+const CATEGORIES: Record<string, UnitCategory> = {
+  length: {
+    label: 'Length',
+    units: {
+      mm: { name: 'mm', factor: 0.001 },
+      cm: { name: 'cm', factor: 0.01 },
+      m: { name: 'm', factor: 1 },
+      km: { name: 'km', factor: 1000 },
+      in: { name: 'in', factor: 0.0254 },
+      ft: { name: 'ft', factor: 0.3048 },
+      yd: { name: 'yd', factor: 0.9144 },
+      mi: { name: 'mi', factor: 1609.344 },
+    },
+  },
+  mass: {
+    label: 'Mass',
+    units: {
+      mg: { name: 'mg', factor: 0.001 },
+      g: { name: 'g', factor: 1 },
+      kg: { name: 'kg', factor: 1000 },
+      t: { name: 't', factor: 1e6 },
+      oz: { name: 'oz', factor: 28.3495 },
+      lb: { name: 'lb', factor: 453.592 },
+    },
+  },
+  temperature: {
+    label: 'Temp',
+    units: { C: { name: '°C' }, F: { name: '°F' }, K: { name: 'K' } },
+    custom: convertTemp,
+  },
+  data: {
+    label: 'Data',
+    units: {
+      B: { name: 'B', factor: 1 },
+      KB: { name: 'KB', factor: 1024 },
+      MB: { name: 'MB', factor: 1048576 },
+      GB: { name: 'GB', factor: 1073741824 },
+      TB: { name: 'TB', factor: 1099511627776 },
+    },
+  },
+  time: {
+    label: 'Time',
+    units: {
+      ms: { name: 'ms', factor: 0.001 },
+      s: { name: 's', factor: 1 },
+      min: { name: 'min', factor: 60 },
+      hr: { name: 'hr', factor: 3600 },
+      day: { name: 'day', factor: 86400 },
+    },
+  },
+  volume: {
+    label: 'Volume',
+    units: {
+      ml: { name: 'mL', factor: 0.001 },
+      l: { name: 'L', factor: 1 },
+      m3: { name: 'm³', factor: 1000 },
+      floz: { name: 'fl oz', factor: 0.0295735 },
+      cup: { name: 'cup', factor: 0.236588 },
+      gal: { name: 'gal', factor: 3.78541 },
+    },
+  },
+  speed: {
+    label: 'Speed',
+    units: {
+      ms: { name: 'm/s', factor: 1 },
+      kmh: { name: 'km/h', factor: 0.277778 },
+      mph: { name: 'mph', factor: 0.44704 },
+      kn: { name: 'knot', factor: 0.514444 },
+    },
+  },
+  area: {
+    label: 'Area',
+    units: {
+      cm2: { name: 'cm²', factor: 0.0001 },
+      m2: { name: 'm²', factor: 1 },
+      ha: { name: 'ha', factor: 10000 },
+      km2: { name: 'km²', factor: 1e6 },
+      ft2: { name: 'ft²', factor: 0.092903 },
+      ac: { name: 'acre', factor: 4046.86 },
+    },
+  },
 };
 
 const UnitConverter: React.FC = () => {
-  const [category, setCategory] = useState('length');
-  const [value, setValue] = useState<number>(1);
+  const [catKey, setCatKey] = useState('length');
+  const [val, setVal] = useState('1');
   const [from, setFrom] = useState('m');
-  const [to, setTo] = useState('km');
-  const [result, setResult] = useState<number>(0.001);
 
-  useEffect(() => {
-    const fromRate = UNITS[category].rates[from];
-    const toRate = UNITS[category].rates[to];
-    const baseValue = value * fromRate;
-    setResult(baseValue / toRate);
-  }, [category, value, from, to]);
+  const cat = CATEGORIES[catKey];
+  const num = parseFloat(val) || 0;
 
-  const changeCategory = (cat: string) => {
-    setCategory(cat);
-    const firstTwo = Object.keys(UNITS[cat].rates);
-    setFrom(firstTwo[0]);
-    setTo(firstTwo[1] || firstTwo[0]);
+  const convert = (to: string) => {
+    if (cat.custom) return cat.custom(num, from, to);
+    return (num * (cat.units[from]?.factor || 1)) / (cat.units[to]?.factor || 1);
+  };
+
+  const fmt = (n: number) => {
+    if (!isFinite(n) || n === 0) return '0';
+    if (Math.abs(n) < 1e-4 || Math.abs(n) >= 1e8) return n.toExponential(4);
+    return Number(n.toPrecision(7)).toString();
   };
 
   return (
-    <div className="tool-panel">
-      <div className="mb-12">
-        <h2 className="text-4xl font-black tracking-tighter uppercase italic">Unit <span className="text-purple-500">Converter</span></h2>
-        <p className="text-slate-500 font-medium tracking-wide">Fast, accurate cross-unit calculations.</p>
-      </div>
-
-      <div className="glass-card border-white/10 rounded-[40px] p-10 shadow-xl max-w-2xl mx-auto bg-black/40">
-        <div className="flex gap-2 mb-10 overflow-x-auto pb-4 no-scrollbar">
-          {Object.keys(UNITS).map(cat => (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-zinc-800">
+        <h1 className="text-base font-semibold text-white">Unit Converter</h1>
+        <div className="flex flex-wrap gap-1 bg-[#0b0b0d] p-1 rounded border border-zinc-800">
+          {Object.entries(CATEGORIES).map(([k, c]) => (
             <button
-              key={cat}
-              onClick={() => changeCategory(cat)}
-              className={`px-6 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all ${category === cat ? 'bg-purple-600 text-white shadow-lg shadow-purple-900/40' : 'bg-white/5 text-slate-500 hover:bg-white/10 hover:text-white'}`}
+              key={k}
+              onClick={() => {
+                setCatKey(k);
+                setFrom(Object.keys(CATEGORIES[k].units)[0]);
+              }}
+              className={`px-2.5 py-1 rounded text-xs font-medium ${
+                catKey === k ? 'bg-white text-black font-semibold' : 'text-zinc-400 hover:text-white'
+              }`}
             >
-              {cat}
+              {c.label}
             </button>
           ))}
         </div>
+      </div>
 
-        <div className="space-y-8">
-          <div className="flex flex-col md:flex-row gap-6 items-end">
-            <div className="flex-1 w-full">
-              <label className="block text-[9px] font-black text-slate-600 uppercase mb-3 tracking-widest">Input Amount</label>
-              <input 
-                type="number" 
-                value={value}
-                onChange={(e) => setValue(parseFloat(e.target.value) || 0)}
-                className="w-full bg-white/5 border border-white/10 rounded-2xl p-6 text-2xl font-black text-white focus:outline-none focus:border-purple-500/50 transition-all"
-              />
-            </div>
-            <div className="w-full md:w-48">
-              <label className="block text-[9px] font-black text-slate-600 uppercase mb-3 tracking-widest">Source Unit</label>
-              <select 
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                className="w-full bg-white/5 border border-white/10 rounded-2xl p-6 text-white text-xs font-black uppercase focus:outline-none appearance-none cursor-pointer"
-              >
-                {Object.keys(UNITS[category].rates).map(u => (
-                  <option key={u} value={u} className="bg-black">{u.toUpperCase()}</option>
-                ))}
-              </select>
-            </div>
-          </div>
+      <div className="studio-panel rounded-lg p-4 flex flex-col sm:flex-row gap-3">
+        <input
+          type="number"
+          value={val}
+          onChange={(e) => setVal(e.target.value)}
+          className="flex-1 bg-[#070708] border border-zinc-800 rounded p-2.5 text-base font-mono text-white focus:outline-none select-text"
+        />
+        <select
+          value={from}
+          onChange={(e) => setFrom(e.target.value)}
+          className="sm:w-36 bg-zinc-900 border border-zinc-800 rounded p-2.5 text-xs font-mono text-white focus:outline-none"
+        >
+          {Object.entries(cat.units).map(([uKey, uObj]) => (
+            <option key={uKey} value={uKey}>
+              {uObj.name}
+            </option>
+          ))}
+        </select>
+      </div>
 
-          <div className="flex justify-center">
-            <div className="w-12 h-12 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-purple-400">
-              <i className="fas fa-exchange-alt"></i>
+      <div key={catKey} className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 tool-view-transition">
+        {Object.entries(cat.units).map(([uKey, uObj]) => {
+          const res = fmt(convert(uKey));
+          return (
+            <div
+              key={uKey}
+              onClick={() => navigator.clipboard.writeText(res)}
+              className="studio-panel rounded-lg p-3 cursor-pointer hover:border-zinc-600 transition-colors"
+              title="Click to copy"
+            >
+              <div className="text-[10px] font-mono text-zinc-500 uppercase">{uObj.name}</div>
+              <div className="font-mono text-sm font-semibold text-white truncate mt-0.5">{res}</div>
             </div>
-          </div>
-
-          <div className="flex flex-col md:flex-row gap-6 items-end">
-            <div className="flex-1 w-full">
-              <label className="block text-[9px] font-black text-slate-600 uppercase mb-3 tracking-widest">Calculated Result</label>
-              <div className="w-full bg-white/5 border border-white/10 rounded-2xl p-6 text-2xl font-black text-purple-400 truncate">
-                {result.toLocaleString(undefined, { maximumFractionDigits: 6 })}
-              </div>
-            </div>
-            <div className="w-full md:w-48">
-              <label className="block text-[9px] font-black text-slate-600 uppercase mb-3 tracking-widest">Target Unit</label>
-              <select 
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
-                className="w-full bg-white/5 border border-white/10 rounded-2xl p-6 text-white text-xs font-black uppercase focus:outline-none appearance-none cursor-pointer"
-              >
-                {Object.keys(UNITS[category].rates).map(u => (
-                  <option key={u} value={u} className="bg-black">{u.toUpperCase()}</option>
-                ))}
-              </select>
-            </div>
-          </div>
-        </div>
+          );
+        })}
       </div>
     </div>
   );

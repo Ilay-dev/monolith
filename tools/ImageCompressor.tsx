@@ -1,149 +1,289 @@
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
-import React, { useState, useRef } from 'react';
+declare const JSZip: any;
+
+interface CompressedItem {
+  id: string;
+  name: string;
+  originalUrl: string;
+  originalSize: number;
+  outUrl: string;
+  outBlob: Blob | null;
+  outSize: number;
+  outWidth: number;
+  outHeight: number;
+}
 
 const ImageCompressor: React.FC = () => {
-  const [image, setImage] = useState<string | null>(null);
+  const [items, setItems] = useState<CompressedItem[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [quality, setQuality] = useState(0.8);
   const [scale, setScale] = useState(100);
-  const [format, setFormat] = useState('image/jpeg');
-  const [info, setInfo] = useState({ originalSize: 0, newSize: 0 });
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [format, setFormat] = useState<'image/webp' | 'image/jpeg' | 'image/png'>('image/webp');
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setInfo({ ...info, originalSize: file.size });
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        setImage(ev.target?.result as string);
-        process(ev.target?.result as string, quality, scale, format);
-      };
-      reader.readAsDataURL(file);
+  const compressSingle = useCallback(
+    async (item: CompressedItem, q: number, s: number, fmt: string): Promise<CompressedItem> =>
+      new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const w = Math.max(1, Math.round(img.naturalWidth * (s / 100)));
+          const h = Math.max(1, Math.round(img.naturalHeight * (s / 100)));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d')!;
+          if (fmt === 'image/jpeg') {
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, w, h);
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          canvas.toBlob(
+            (blob) => {
+              resolve({
+                ...item,
+                outUrl: blob ? URL.createObjectURL(blob) : item.originalUrl,
+                outBlob: blob,
+                outSize: blob ? blob.size : item.originalSize,
+                outWidth: w,
+                outHeight: h,
+              });
+            },
+            fmt,
+            q
+          );
+        };
+        img.src = item.originalUrl;
+      }),
+    []
+  );
+
+  const reprocessAll = useCallback(
+    async (list: CompressedItem[], q: number, s: number, fmt: string) => {
+      if (list.length === 0) return;
+      const updated: CompressedItem[] = [];
+      for (const it of list) {
+        updated.push(await compressSingle(it, q, s, fmt));
+      }
+      setItems(updated);
+    },
+    [compressSingle]
+  );
+
+  useEffect(() => {
+    if (items.length > 0) {
+      const t = setTimeout(() => reprocessAll(items, quality, scale, format), 100);
+      return () => clearTimeout(t);
     }
-  };
+  }, [quality, scale, format]);
 
-  const process = (src: string, q: number, s: number, f: string) => {
-    const img = new Image();
-    img.src = src;
-    img.onload = () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      const w = img.width * (s / 100);
-      const h = img.height * (s / 100);
-      canvas.width = w;
-      canvas.height = h;
-      ctx.drawImage(img, 0, 0, w, h);
-
-      const dataUrl = canvas.toDataURL(f, q);
-      const size = Math.round((dataUrl.length * 3) / 4);
-      setInfo(prev => ({ ...prev, newSize: size }));
-    };
-  };
-
-  const download = () => {
-    const link = document.createElement('a');
-    link.download = `onyx-optimized.${format === 'image/png' ? 'png' : 'jpg'}`;
-    link.href = canvasRef.current?.toDataURL(format, quality) || '';
-    link.click();
+  const handleFiles = async (fileList: FileList | null) => {
+    if (!fileList) return;
+    const raw: CompressedItem[] = Array.from(fileList)
+      .filter((f) => f.type.startsWith('image/'))
+      .map((f) => ({
+        id: Math.random().toString(36).slice(2, 8),
+        name: f.name,
+        originalUrl: URL.createObjectURL(f),
+        originalSize: f.size,
+        outUrl: '',
+        outBlob: null,
+        outSize: f.size,
+        outWidth: 0,
+        outHeight: 0,
+      }));
+    if (raw.length === 0) return;
+    if (!activeId) setActiveId(raw[0].id);
+    await reprocessAll([...items, ...raw], quality, scale, format);
   };
 
   const formatSize = (bytes: number) => {
     if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    const i = Math.min(2, Math.floor(Math.log(bytes) / Math.log(1024)));
+    return parseFloat((bytes / Math.pow(1024, i)).toFixed(1)) + ' ' + ['B', 'KB', 'MB'][i];
   };
 
+  const ext = format === 'image/webp' ? 'webp' : format === 'image/png' ? 'png' : 'jpg';
+
+  const downloadSingle = (item: CompressedItem) => {
+    const link = document.createElement('a');
+    link.download = `${item.name.replace(/\.[^/.]+$/, '')}-min.${ext}`;
+    link.href = item.outUrl;
+    link.click();
+  };
+
+  const downloadAll = async () => {
+    if (items.length === 1 || typeof JSZip === 'undefined') {
+      items.forEach(downloadSingle);
+      return;
+    }
+    const zip = new JSZip();
+    items.forEach((it) => {
+      if (it.outBlob) zip.file(`${it.name.replace(/\.[^/.]+$/, '')}-min.${ext}`, it.outBlob);
+    });
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const link = document.createElement('a');
+    link.download = `compressed-${Date.now()}.zip`;
+    link.href = URL.createObjectURL(blob);
+    link.click();
+  };
+
+  const totalOrig = items.reduce((a, i) => a + i.originalSize, 0);
+  const totalOut = items.reduce((a, i) => a + i.outSize, 0);
+  const savedPct = totalOrig > 0 ? Math.round((1 - totalOut / totalOrig) * 100) : 0;
+  const activeItem = items.find((i) => i.id === activeId) || items[0];
+
   return (
-    <div className="tool-panel max-w-4xl mx-auto">
-      <div className="mb-12">
-        <h2 className="text-4xl font-black tracking-tighter mb-2">Size Reducer</h2>
-        <p className="text-slate-400">Optimize image weight for lightning fast load times.</p>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-zinc-800">
+        <div className="flex items-center gap-3">
+          <h1 className="text-base font-semibold text-white">Size Reducer</h1>
+          {items.length > 0 && (
+            <span className="font-mono text-xs text-zinc-400">
+              {formatSize(totalOrig)} → <span className="text-white">{formatSize(totalOut)}</span> (
+              {savedPct > 0 ? `-${savedPct}%` : '0%'})
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="px-3 py-1.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs text-zinc-200"
+          >
+            Add Images
+          </button>
+          {items.length > 0 && (
+            <>
+              <button
+                onClick={() => setItems([])}
+                className="px-2.5 py-1.5 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-400 hover:text-red-400"
+              >
+                Clear
+              </button>
+              <button
+                onClick={downloadAll}
+                className="px-3.5 py-1.5 rounded bg-white hover:bg-zinc-200 text-black text-xs font-semibold"
+              >
+                Export {items.length > 1 ? `ZIP (${items.length})` : ''}
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
-        <div className="space-y-8">
-          <div 
-            onClick={() => fileInputRef.current?.click()}
-            className="file-drop-zone aspect-video rounded-2xl flex flex-col items-center justify-center gap-4 cursor-pointer group"
-          >
-            {image ? (
-                <img src={image} className="w-full h-full object-contain rounded-xl p-2" />
-            ) : (
-                <>
-                    <div className="w-12 h-12 bg-white/5 rounded-full flex items-center justify-center border border-white/10 group-hover:scale-110 transition-transform">
-                        <i className="fas fa-cloud-upload-alt text-slate-400"></i>
-                    </div>
-                    <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Select Image Asset</p>
-                </>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        accept="image/*"
+        onChange={(e) => handleFiles(e.target.files)}
+        className="hidden"
+      />
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        <div className="lg:col-span-4 space-y-3">
+          <div className="studio-panel rounded-lg p-4 space-y-4">
+            <div className="grid grid-cols-3 gap-1.5">
+              {[
+                { id: 'image/webp', label: 'WebP' },
+                { id: 'image/jpeg', label: 'JPEG' },
+                { id: 'image/png', label: 'PNG' },
+              ].map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => setFormat(f.id as any)}
+                  className={`py-1.5 rounded text-xs font-mono border ${
+                    format === f.id
+                      ? 'bg-white text-black border-white font-semibold'
+                      : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+
+            {format !== 'image/png' && (
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs">
+                  <span className="text-zinc-400">Quality</span>
+                  <span className="font-mono text-zinc-200">{Math.round(quality * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min="0.05"
+                  max="1"
+                  step="0.01"
+                  value={quality}
+                  onChange={(e) => setQuality(parseFloat(e.target.value))}
+                />
+              </div>
             )}
-            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleFile} className="hidden" />
-          </div>
 
-          <div className="glass-card p-6 rounded-2xl space-y-8">
-            <div className="space-y-4">
-              <div className="flex justify-between text-xs font-bold text-slate-400 uppercase">
-                <span>Compression Quality</span>
-                <span className="text-purple-400">{Math.round(quality * 100)}%</span>
+            <div className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-400">Scale</span>
+                <span className="font-mono text-zinc-200">{scale}%</span>
               </div>
-              <input 
-                type="range" min="0.1" max="1" step="0.05" 
-                value={quality} 
-                onChange={(e) => {setQuality(parseFloat(e.target.value)); if(image) process(image, parseFloat(e.target.value), scale, format); }}
-                className="w-full"
+              <input
+                type="range"
+                min="10"
+                max="100"
+                step="5"
+                value={scale}
+                onChange={(e) => setScale(parseInt(e.target.value))}
               />
             </div>
-
-            <div className="space-y-4">
-              <div className="flex justify-between text-xs font-bold text-slate-400 uppercase">
-                <span>Scale Dimensions</span>
-                <span className="text-purple-400">{scale}%</span>
-              </div>
-              <input 
-                type="range" min="10" max="100" step="5" 
-                value={scale} 
-                onChange={(e) => {setScale(parseInt(e.target.value)); if(image) process(image, quality, parseInt(e.target.value), format); }}
-                className="w-full"
-              />
-            </div>
-
-            <button 
-              disabled={!image}
-              onClick={download}
-              className="w-full bg-white text-black font-bold py-4 rounded transition-all hover:bg-slate-200 disabled:opacity-50"
-            >
-              Export Optimized Asset
-            </button>
           </div>
+
+          {items.length > 0 && (
+            <div className="studio-panel rounded-lg p-2.5 space-y-1 max-h-64 overflow-y-auto custom-scrollbar">
+              {items.map((item) => (
+                <div
+                  key={item.id}
+                  onClick={() => setActiveId(item.id)}
+                  className={`flex items-center justify-between px-2.5 py-1.5 rounded text-xs cursor-pointer ${
+                    activeItem?.id === item.id ? 'bg-zinc-800 text-white' : 'text-zinc-400 hover:bg-zinc-900'
+                  }`}
+                >
+                  <span className="truncate pr-2">{item.name}</span>
+                  <span className="font-mono text-[11px] flex-shrink-0">{formatSize(item.outSize)}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="space-y-6">
-            <div className="glass-card p-8 rounded-2xl space-y-6 text-center">
-                <p className="text-[10px] font-black uppercase text-slate-500 tracking-[0.2em]">Efficiency Report</p>
-                <div className="flex justify-around items-center">
-                    <div>
-                        <div className="text-2xl font-black text-white">{formatSize(info.originalSize)}</div>
-                        <div className="text-[10px] text-slate-500 uppercase font-bold mt-1">Input</div>
-                    </div>
-                    <i className="fas fa-arrow-right text-slate-700"></i>
-                    <div>
-                        <div className="text-2xl font-black text-purple-400">{formatSize(info.newSize)}</div>
-                        <div className="text-[10px] text-slate-500 uppercase font-bold mt-1">Output</div>
-                    </div>
-                </div>
-                {info.originalSize > 0 && (
-                   <div className="pt-4 border-t border-white/5">
-                        <span className="text-5xl font-black text-emerald-400">-{Math.max(0, Math.round(100 - (info.newSize/info.originalSize)*100))}%</span>
-                        <p className="text-[10px] text-slate-500 uppercase font-bold mt-2">Storage Saved</p>
-                   </div>
-                )}
+        <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            handleFiles(e.dataTransfer.files);
+          }}
+          className="lg:col-span-8 studio-panel rounded-lg checkerboard min-h-[380px] flex items-center justify-center p-4"
+        >
+          {activeItem ? (
+            <div className="text-center space-y-2">
+              <img
+                src={activeItem.outUrl}
+                alt="Preview"
+                className="max-h-[56vh] object-contain rounded border border-zinc-800 mx-auto"
+              />
+              <div className="font-mono text-[11px] text-zinc-400">
+                {activeItem.outWidth}×{activeItem.outHeight}px • {formatSize(activeItem.originalSize)} →{' '}
+                {formatSize(activeItem.outSize)}
+              </div>
             </div>
-            <canvas ref={canvasRef} className="hidden" />
+          ) : (
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="text-center p-8 text-xs text-zinc-500 hover:text-zinc-300"
+            >
+              <i className="fas fa-plus block text-lg mb-2"></i>
+              Drop images or click to add
+            </button>
+          )}
         </div>
       </div>
     </div>

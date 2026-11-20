@@ -1,39 +1,66 @@
-
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Onyx Studio</title>
-    <link rel="icon" type="image/svg+xml" href="Untitled.png">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MONOLITH — Local Workstation</title>
+    <link rel="icon" type="image/png" href="Untitled.png">
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/gh/jond01/imagetracerjs/imagetracer_v1.2.6.js"></script>
-    <script src="https://unpkg.com/piexifjs@1.0.6/piexif.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
+              mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'monospace'],
+            }
+          }
+        }
+      }
+    </script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/gh/jond01/imagetracerjs/imagetracer_v1.2.6.js" defer></script>
+    <script src="https://unpkg.com/piexifjs@1.0.6/piexif.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js" defer></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
         :root {
-            --bg-main: #000000;
-            --accent: #a855f7;
-            --border-muted: rgba(255, 255, 255, 0.08);
-            --card-bg: rgba(255, 255, 255, 0.015);
+            --bg-base: #060608;
+            --bg-panel: #0d0d10;
+            --bg-elevated: #141418;
+            --border-subtle: #202026;
+            --border-hover: #32323c;
+            --text-primary: #fafafa;
+            --text-secondary: #a1a1aa;
+            --signal: #ff4f00;
+            --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+            --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+            --scroll-y: 0px;
+            --parallax-x: 0px;
+            --parallax-y: 0px;
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
         }
 
         html, body {
-            background-color: var(--bg-main);
-            color: #ffffff;
-            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
             margin: 0;
             padding: 0;
-            height: 100vh;
-            width: 100vw;
+            height: 100%;
+            width: 100%;
             overflow: hidden;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
 
         #root {
@@ -41,87 +68,175 @@
             width: 100%;
         }
 
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #222; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: var(--accent); }
-
-        .glass-card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-muted);
-            backdrop-filter: blur(40px);
+        /* Subtle Architectural Parallax Grid Layer */
+        .parallax-backdrop {
+            background-image:
+                radial-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1px),
+                linear-gradient(to right, rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+                linear-gradient(to bottom, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+            background-size: 28px 28px, 112px 112px, 112px 112px;
+            transform: translate3d(var(--parallax-x), calc(var(--scroll-y) * -0.18 + var(--parallax-y)), 0);
+            will-change: transform;
+            transition: transform 0.12s cubic-bezier(0.2, 0, 0.2, 1);
         }
+
+        /* Tab & View Switch Transition */
+        @keyframes monolithViewEnter {
+            0% {
+                opacity: 0;
+                transform: translate3d(0, 12px, 0) scale(0.992);
+                filter: blur(4px);
+            }
+            100% {
+                opacity: 1;
+                transform: translate3d(0, 0, 0) scale(1);
+                filter: blur(0px);
+            }
+        }
+
+        @keyframes monolithPanelReveal {
+            0% {
+                opacity: 0;
+                transform: translate3d(0, 14px, 0);
+            }
+            100% {
+                opacity: 1;
+                transform: translate3d(0, 0, 0);
+            }
+        }
+
+        .tool-view-transition {
+            animation: monolithViewEnter 340ms var(--ease-out-expo) both;
+        }
+
+        /* Staggered Panel Entrance & Scroll Reveal */
+        .studio-panel {
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.022) 0%, rgba(255, 255, 255, 0) 100%), var(--bg-panel);
+            border: 1px solid var(--border-subtle);
+            box-shadow: 0 10px 30px -15px rgba(0, 0, 0, 0.7), inset 0 1px 0 0 rgba(255, 255, 255, 0.04);
+            transition: border-color 220ms ease, transform 260ms var(--ease-spring), box-shadow 260ms ease;
+            animation: monolithPanelReveal 420ms var(--ease-out-expo) both;
+        }
+
+        .studio-panel:nth-child(1) { animation-delay: 20ms; }
+        .studio-panel:nth-child(2) { animation-delay: 65ms; }
+        .studio-panel:nth-child(3) { animation-delay: 110ms; }
+        .studio-panel:nth-child(4) { animation-delay: 155ms; }
+
+        .studio-panel:hover {
+            border-color: var(--border-hover);
+        }
+
+        .scroll-reveal-item {
+            opacity: 0;
+            transform: translate3d(0, 18px, 0);
+            transition: opacity 420ms var(--ease-out-expo), transform 420ms var(--ease-out-expo);
+        }
+
+        .scroll-reveal-item.is-visible {
+            opacity: 1;
+            transform: translate3d(0, 0, 0);
+        }
+
+        /* Interactive Button Micro-Transitions */
+        button, label, select, input[type="text"], input[type="number"], textarea {
+            transition: all 160ms var(--ease-spring);
+        }
+
+        button:active:not(:disabled) {
+            transform: scale(0.975);
+        }
+
+        /* Scrollbars */
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #26262e; border-radius: 9999px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #4a4a56; }
+
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 
         .checkerboard {
-            background-image: linear-gradient(45deg, #0a0a0a 25%, transparent 25%), linear-gradient(-45deg, #0a0a0a 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #0a0a0a 75%), linear-gradient(-45deg, transparent 75%, #0a0a0a 75%);
-            background-size: 20px 20px;
-            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-            background-color: #050505;
+            background-image:
+                linear-gradient(45deg, #101014 25%, transparent 25%),
+                linear-gradient(-45deg, #101014 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, #101014 75%),
+                linear-gradient(-45deg, transparent 75%, #101014 75%);
+            background-size: 18px 18px;
+            background-position: 0 0, 0 9px, 9px -9px, -9px 0px;
+            background-color: #08080a;
         }
 
-                /* --- SLIDER FIX START --- */
+        /* Range Sliders */
         input[type=range] {
             -webkit-appearance: none;
+            appearance: none;
             width: 100%;
             background: transparent;
         }
 
         input[type=range]:focus { outline: none; }
 
-        /* Track (Der Balken) */
         input[type=range]::-webkit-slider-runnable-track {
             width: 100%;
-            height: 6px;
+            height: 5px;
             cursor: pointer;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
-        
-        /* Thumb (Der Knopf) */
-        input[type=range]::-webkit-slider-thumb {
-            height: 18px;
-            width: 18px;
-            border-radius: 50%;
-            background: #a855f7;
-            cursor: pointer;
-            -webkit-appearance: none;
-            margin-top: -7px; /* Zentriert den Knopf auf dem Track */
-            box-shadow: 0 0 10px rgba(168, 85, 247, 0.5);
+            background: #24242b;
+            border-radius: 999px;
+            transition: background-color 150ms ease;
         }
 
-        /* Firefox Support */
+        input[type=range]:hover::-webkit-slider-runnable-track {
+            background: #32323c;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            height: 15px;
+            width: 15px;
+            border-radius: 4px;
+            background: #ffffff;
+            border: 1px solid #000000;
+            cursor: pointer;
+            -webkit-appearance: none;
+            margin-top: -5px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+            transition: transform 150ms var(--ease-spring), background-color 150ms ease;
+        }
+
+        input[type=range]::-webkit-slider-thumb:hover {
+            transform: scale(1.16);
+            background: #ff4f00;
+        }
+
         input[type=range]::-moz-range-track {
             width: 100%;
-            height: 6px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
+            height: 5px;
+            background: #24242b;
+            border-radius: 999px;
         }
+
         input[type=range]::-moz-range-thumb {
-            height: 18px;
-            width: 18px;
-            border-radius: 50%;
-            background: #a855f7;
-            border: 2px solid white;
+            height: 15px;
+            width: 15px;
+            border-radius: 4px;
+            background: #ffffff;
+            border: 1px solid #000000;
+            cursor: pointer;
         }
-        /* --- SLIDER FIX ENDE --- */
+
+        input[type=color] {
+            -webkit-appearance: none;
+            border: 1px solid #2b2b33;
+            padding: 0;
+            background: transparent;
+            cursor: pointer;
+        }
+        input[type=color]::-webkit-color-swatch-wrapper { padding: 2px; }
+        input[type=color]::-webkit-color-swatch { border: none; border-radius: 4px; }
     </style>
-<script type="importmap">
-{
-  "imports": {
-    "react": "https://esm.sh/react@^19.2.3",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "react/": "https://esm.sh/react@^19.2.3/",
-    "vite": "https://esm.sh/vite@^7.3.0",
-    "@vitejs/plugin-react": "https://esm.sh/@vitejs/plugin-react@^5.1.2"
-  }
-}
-</script>
-<link rel="stylesheet" href="/index.css">
 </head>
-<body class="bg-black">
+<body class="bg-[#060608] text-zinc-100 select-none">
     <div id="root"></div>
     <script type="module" src="./index.tsx"></script>
-<script type="module" src="/index.tsx"></script>
 </body>
 </html>

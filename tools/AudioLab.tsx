@@ -1,177 +1,221 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 const AudioLab: React.FC = () => {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [scopeMode, setScopeMode] = useState<'waveform' | 'spectrum'>('waveform');
   const [frequency, setFrequency] = useState(440);
   const [type, setType] = useState<OscillatorType>('sine');
-  const [volume, setVolume] = useState(0.2);
-  const [pan, setPan] = useState(0);
-  
-  const [lfoRate, setLfoRate] = useState(5);
+  const [filterCutoff, setFilterCutoff] = useState(8000);
+  const [lfoRate, setLfoRate] = useState(4);
   const [lfoDepth, setLfoDepth] = useState(0);
-  const [distortion, setDistortion] = useState(0);
+  const [volume, setVolume] = useState(0.25);
 
   const audioCtx = useRef<AudioContext | null>(null);
-  const oscillator = useRef<OscillatorNode | null>(null);
-  const lfo = useRef<OscillatorNode | null>(null);
-  const lfoGain = useRef<GainNode | null>(null);
-  const distortionNode = useRef<WaveShaperNode | null>(null);
-  const gainNode = useRef<GainNode | null>(null);
-  const pannerNode = useRef<StereoPannerNode | null>(null);
-  const analyser = useRef<AnalyserNode | null>(null);
+  const oscRef = useRef<OscillatorNode | null>(null);
+  const lfoRef = useRef<OscillatorNode | null>(null);
+  const lfoGainRef = useRef<GainNode | null>(null);
+  const filterRef = useRef<BiquadFilterNode | null>(null);
+  const gainRef = useRef<GainNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const requestRef = useRef<number>(0);
+  const rafRef = useRef<number>(0);
 
-  const makeDistortionCurve = (amount: number) => {
-    const k = amount;
-    const n_samples = 44100;
-    const curve = new Float32Array(n_samples);
-    const deg = Math.PI / 180;
-    for (let i = 0; i < n_samples; ++i) {
-      const x = (i * 2) / n_samples - 1;
-      curve[i] = ((3 + k) * x * 20 * deg) / (Math.PI + k * Math.abs(x));
+  const toggleSynth = () => {
+    if (isPlaying) {
+      try { oscRef.current?.stop(); lfoRef.current?.stop(); } catch {}
+      cancelAnimationFrame(rafRef.current);
+      setIsPlaying(false);
+      return;
     }
-    return curve;
-  };
 
-  const initAudio = () => {
     if (!audioCtx.current) {
       audioCtx.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-      analyser.current = audioCtx.current.createAnalyser();
-      analyser.current.fftSize = 2048;
-      gainNode.current = audioCtx.current.createGain();
-      pannerNode.current = audioCtx.current.createStereoPanner();
-      distortionNode.current = audioCtx.current.createWaveShaper();
-      distortionNode.current.curve = makeDistortionCurve(0);
-      distortionNode.current.oversample = '4x';
-      lfoGain.current = audioCtx.current.createGain();
-      lfoGain.current.gain.value = 0;
-
-      distortionNode.current.connect(gainNode.current);
-      gainNode.current.connect(pannerNode.current);
-      pannerNode.current.connect(analyser.current);
-      analyser.current.connect(audioCtx.current.destination);
     }
-  };
+    const ctx = audioCtx.current;
+    if (ctx.state === 'suspended') ctx.resume();
 
-  const togglePlayback = () => {
-    initAudio();
-    const ctx = audioCtx.current!;
-    if (isPlaying) {
-      oscillator.current?.stop();
-      lfo.current?.stop();
-      setIsPlaying(false);
-    } else {
-      if (ctx.state === 'suspended') ctx.resume();
-      oscillator.current = ctx.createOscillator();
-      oscillator.current.type = type;
-      oscillator.current.frequency.setValueAtTime(frequency, ctx.currentTime);
-      lfo.current = ctx.createOscillator();
-      lfo.current.frequency.setValueAtTime(lfoRate, ctx.currentTime);
-      lfo.current.connect(lfoGain.current!);
-      lfoGain.current!.connect(oscillator.current.frequency);
-      oscillator.current.connect(distortionNode.current!);
-      lfo.current.start();
-      oscillator.current.start();
-      setIsPlaying(true);
-    }
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyserRef.current = analyser;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = filterCutoff;
+    filterRef.current = filter;
+
+    const gain = ctx.createGain();
+    gain.gain.value = volume;
+    gainRef.current = gain;
+
+    const osc = ctx.createOscillator();
+    osc.type = type;
+    osc.frequency.value = frequency;
+    oscRef.current = osc;
+
+    const lfo = ctx.createOscillator();
+    lfo.frequency.value = lfoRate;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = lfoDepth;
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+    lfoRef.current = lfo;
+    lfoGainRef.current = lfoGain;
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(analyser);
+    analyser.connect(ctx.destination);
+
+    osc.start();
+    lfo.start();
+    setIsPlaying(true);
   };
 
   useEffect(() => {
     const ctx = audioCtx.current;
     if (!ctx) return;
-    if (oscillator.current) {
-      oscillator.current.frequency.setTargetAtTime(frequency, ctx.currentTime, 0.05);
-      oscillator.current.type = type;
+    if (oscRef.current) {
+      oscRef.current.frequency.setTargetAtTime(frequency, ctx.currentTime, 0.02);
+      oscRef.current.type = type;
     }
-    if (gainNode.current) gainNode.current.gain.setTargetAtTime(volume, ctx.currentTime, 0.05);
-    if (pannerNode.current) pannerNode.current.pan.setTargetAtTime(pan, ctx.currentTime, 0.05);
-    if (lfo.current) lfo.current.frequency.setTargetAtTime(lfoRate, ctx.currentTime, 0.05);
-    if (lfoGain.current) lfoGain.current.gain.setTargetAtTime(lfoDepth, ctx.currentTime, 0.05);
-    if (distortionNode.current) distortionNode.current.curve = makeDistortionCurve(distortion);
-  }, [frequency, type, volume, pan, lfoRate, lfoDepth, distortion]);
+    if (filterRef.current) filterRef.current.frequency.setTargetAtTime(filterCutoff, ctx.currentTime, 0.02);
+    if (lfoRef.current) lfoRef.current.frequency.setTargetAtTime(lfoRate, ctx.currentTime, 0.02);
+    if (lfoGainRef.current) lfoGainRef.current.gain.setTargetAtTime(lfoDepth, ctx.currentTime, 0.02);
+    if (gainRef.current) gainRef.current.gain.setTargetAtTime(volume, ctx.currentTime, 0.02);
+  }, [frequency, type, filterCutoff, lfoRate, lfoDepth, volume]);
 
-  const renderVisualization = useCallback(() => {
-    if (!canvasRef.current || !analyser.current) return;
+  const drawScope = useCallback(() => {
     const canvas = canvasRef.current;
+    const analyser = analyserRef.current;
+    if (!canvas || !analyser) return;
     const ctx = canvas.getContext('2d')!;
-    const bufferLength = analyser.current.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-    const draw = () => {
-      requestRef.current = requestAnimationFrame(draw);
-      analyser.current!.getByteTimeDomainData(dataArray);
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.strokeStyle = '#a855f7';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      const sliceWidth = canvas.width / bufferLength;
-      let x = 0;
-      for (let i = 0; i < bufferLength; i++) {
-        const v = dataArray[i] / 128.0;
-        const y = (v * canvas.height) / 2;
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        x += sliceWidth;
+    const bufLen = analyser.frequencyBinCount;
+    const data = new Uint8Array(bufLen);
+
+    const render = () => {
+      rafRef.current = requestAnimationFrame(render);
+      const w = canvas.width, h = canvas.height;
+      ctx.fillStyle = '#070708';
+      ctx.fillRect(0, 0, w, h);
+
+      if (scopeMode === 'waveform') {
+        analyser.getByteTimeDomainData(data);
+        let trig = 0;
+        for (let i = 1; i < bufLen / 2; i++) {
+          if (data[i - 1] < 128 && data[i] >= 128) { trig = i; break; }
+        }
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        const len = Math.min(bufLen - trig, 600);
+        for (let i = 0; i < len; i++) {
+          const x = (i / len) * w;
+          const y = ((data[trig + i] / 128.0) * h) / 2;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      } else {
+        analyser.getByteFrequencyData(data);
+        const bars = 96;
+        const bw = w / bars;
+        for (let i = 0; i < bars; i++) {
+          const v = data[i * 2] / 255;
+          const bh = v * (h - 10);
+          ctx.fillStyle = v > 0.8 ? '#ff4f00' : '#ffffff';
+          ctx.fillRect(i * bw + 1, h - bh, Math.max(1, bw - 2), bh);
+        }
       }
-      ctx.lineTo(canvas.width, canvas.height / 2);
-      ctx.stroke();
     };
-    draw();
-  }, []);
+    render();
+  }, [scopeMode]);
 
   useEffect(() => {
-    if (isPlaying) renderVisualization();
-    else cancelAnimationFrame(requestRef.current);
-  }, [isPlaying, renderVisualization]);
+    if (isPlaying) {
+      cancelAnimationFrame(rafRef.current);
+      drawScope();
+    }
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [isPlaying, scopeMode, drawScope]);
+
+  useEffect(() => () => {
+    try { oscRef.current?.stop(); lfoRef.current?.stop(); } catch {}
+    cancelAnimationFrame(rafRef.current);
+  }, []);
 
   return (
-    <div className="tool-panel">
-      <div className="mb-8 flex justify-between items-end">
-        <div>
-          <h2 className="text-4xl font-black tracking-tighter uppercase italic text-white mb-2">Signal <span className="text-purple-500">Lab</span></h2>
-          <p className="text-slate-500 font-medium tracking-wide">Next-gen synthesis & waveform analysis.</p>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+        <h1 className="text-base font-semibold text-white">Signal Lab</h1>
+        <div className="flex items-center gap-2">
+          <div className="flex bg-[#0b0b0d] p-0.5 rounded border border-zinc-800">
+            {(['waveform', 'spectrum'] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setScopeMode(m)}
+                className={`px-2.5 py-1 rounded text-xs font-mono capitalize ${
+                  scopeMode === m ? 'bg-white text-black font-semibold' : 'text-zinc-400'
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={toggleSynth}
+            className={`px-4 py-1.5 rounded text-xs font-semibold ${
+              isPlaying ? 'bg-[#ff4f00] text-black' : 'bg-white text-black'
+            }`}
+          >
+            {isPlaying ? 'Stop' : 'Start'}
+          </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-6">
-          <div className="bg-black border border-white/10 p-1 rounded-2xl shadow-2xl overflow-hidden aspect-video relative group">
-            <canvas ref={canvasRef} className="w-full h-full rounded-xl" width={1200} height={600} />
-            <div className="absolute top-6 left-6 flex items-center gap-4">
-              <div className={`w-3 h-3 rounded-full ${isPlaying ? 'bg-purple-500 animate-pulse shadow-[0_0_15px_#a855f7]' : 'bg-slate-900'}`}></div>
-              <div className="text-[10px] font-black text-white uppercase tracking-widest">{isPlaying ? 'Transmitting' : 'Idle'}</div>
-            </div>
-          </div>
-          <button onClick={togglePlayback} className={`w-full py-8 rounded-2xl font-black text-sm uppercase tracking-[0.3em] transition-all transform active:scale-95 ${isPlaying ? 'bg-red-500/10 text-red-500 border border-red-500/30' : 'bg-white text-black hover:bg-slate-200'}`}>
-            <i className={`fas ${isPlaying ? 'fa-power-off' : 'fa-bolt'} mr-4`}></i>
-            {isPlaying ? 'Kill Signal' : 'Initiate Synth'}
-          </button>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        <div className="lg:col-span-8 studio-panel rounded-lg overflow-hidden">
+          <canvas ref={canvasRef} width={800} height={360} className="w-full h-72 sm:h-80 bg-[#070708] block" />
         </div>
 
-        <div className="space-y-6">
-          <div className="glass-card p-8 rounded-3xl space-y-10 border border-white/5 bg-black/40">
-            <div className="space-y-4">
-              <label className="block text-[9px] font-black text-slate-500 uppercase tracking-[0.3em]">Wave Architecture</label>
-              <div className="grid grid-cols-4 gap-2">
-                {['sine', 'square', 'sawtooth', 'triangle'].map(w => (
-                  <button key={w} onClick={() => setType(w as OscillatorType)} className={`aspect-square rounded-xl flex items-center justify-center transition-all border ${type === w ? 'bg-purple-600 border-purple-400 text-white' : 'bg-white/5 text-slate-600 border-white/5'}`}>
-                    <i className={`fas fa-wave-square text-xs`}></i>
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="space-y-8 pt-4 border-t border-white/5">
-              <div className="space-y-2">
-                <label className="block text-[10px] text-slate-400 uppercase font-bold tracking-widest">Frequency: {frequency}Hz</label>
-                <input type="range" min="20" max="2000" step="1" value={frequency} onChange={(e) => setFrequency(parseInt(e.target.value))} className="w-full" />
-              </div>
-              <div className="space-y-2">
-                <label className="block text-[10px] text-slate-400 uppercase font-bold tracking-widest">Master Vol: {Math.round(volume * 100)}%</label>
-                <input type="range" min="0" max="1" step="0.01" value={volume} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-full" />
-              </div>
-            </div>
+        <div className="lg:col-span-4 studio-panel rounded-lg p-4 space-y-4">
+          <div className="grid grid-cols-4 gap-1.5">
+            {(['sine', 'square', 'sawtooth', 'triangle'] as const).map((w) => (
+              <button
+                key={w}
+                onClick={() => setType(w)}
+                className={`py-1.5 rounded text-xs font-mono uppercase border ${
+                  type === w ? 'bg-white text-black border-white font-semibold' : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                }`}
+              >
+                {w.slice(0, 4)}
+              </button>
+            ))}
           </div>
+
+          {[
+            { l: 'Frequency', v: frequency, set: setFrequency, min: 20, max: 2000, step: 1, u: 'Hz' },
+            { l: 'Lowpass Cutoff', v: filterCutoff, set: setFilterCutoff, min: 100, max: 12000, step: 50, u: 'Hz' },
+            { l: 'LFO Rate', v: lfoRate, set: setLfoRate, min: 0.5, max: 20, step: 0.5, u: 'Hz' },
+            { l: 'LFO Depth', v: lfoDepth, set: setLfoDepth, min: 0, max: 150, step: 1, u: 'Hz' },
+            { l: 'Volume', v: volume, set: setVolume, min: 0, max: 1, step: 0.01, u: '' },
+          ].map((s) => (
+            <div key={s.l} className="space-y-1">
+              <div className="flex justify-between text-xs">
+                <span className="text-zinc-400">{s.l}</span>
+                <span className="font-mono text-zinc-200">
+                  {s.u === '' ? `${Math.round(s.v * 100)}%` : `${s.v} ${s.u}`}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={s.min}
+                max={s.max}
+                step={s.step}
+                value={s.v}
+                onChange={(e) => s.set(parseFloat(e.target.value))}
+              />
+            </div>
+          ))}
         </div>
       </div>
     </div>

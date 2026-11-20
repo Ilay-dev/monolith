@@ -1,161 +1,243 @@
-
-import React, { useState, useRef } from 'react';
-import Navbar from './components/Navbar';
+import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from 'react';
 import Sidebar from './components/Sidebar';
-import Background3D from './components/Background3D';
-import Home from './tools/Home';
-import ImageStudio from './tools/ImageStudio';
-import PaintPro from './tools/PaintPro';
-import ImageCompressor from './tools/ImageCompressor';
-import MetadataEditor from './tools/MetadataEditor';
-import UnitConverter from './tools/UnitConverter';
-import ColorConverter from './tools/ColorConverter';
-import GradientDesigner from './tools/GradientDesigner';
-import AudioLab from './tools/AudioLab';
-import AudioMixer from './tools/AudioMixer';
-import BlenderHelper from './tools/BlenderHelper';
-import ZipExpander from './tools/ZipExpander';
-import KeyVisualizer from './tools/KeyVisualizer';
-import TTSStudio from './tools/TTSStudio';
-import QRGenerator from './tools/QRGenerator';
-import PasswordGenerator from './tools/PasswordGenerator';
-import JSONFormatter from './tools/JSONFormatter';
-import BinaryConverter from './tools/BinaryConverter';
-import CipherTool from './tools/CipherTool';
-import LoremGenerator from './tools/LoremGenerator';
-import HardwareLab from './tools/HardwareLab';
-import OfficeEditor from './tools/OfficeEditor';
-import OfficeConverter from './tools/OfficeConverter';
-import { ToolId } from './types';
+import { ToolId, TOOLS } from './types';
+
+const ImageStudio = lazy(() => import('./tools/ImageStudio'));
+const VideoEditor = lazy(() => import('./tools/VideoEditor'));
+const PaintPro = lazy(() => import('./tools/PaintPro'));
+const ImageCompressor = lazy(() => import('./tools/ImageCompressor'));
+const AudioMixer = lazy(() => import('./tools/AudioMixer'));
+const OfficeEditor = lazy(() => import('./tools/OfficeEditor'));
+const OfficeConverter = lazy(() => import('./tools/OfficeConverter'));
+const BinaryConverter = lazy(() => import('./tools/BinaryConverter'));
+const KeyVisualizer = lazy(() => import('./tools/KeyVisualizer'));
+const AudioLab = lazy(() => import('./tools/AudioLab'));
+const SpectrogramLab = lazy(() => import('./tools/SpectrogramLab'));
+const QRGenerator = lazy(() => import('./tools/QRGenerator'));
+const MetadataEditor = lazy(() => import('./tools/MetadataEditor'));
+const UnitConverter = lazy(() => import('./tools/UnitConverter'));
 
 const App: React.FC = () => {
-  const [activeTool, setActiveTool] = useState<ToolId>('home');
-  const [sidebarWidth, setSidebarWidth] = useState(280);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
-  const isResizing = useRef(false);
+  const [activeTool, setActiveTool] = useState<ToolId>(() => {
+    const saved = localStorage.getItem('monolith_active_tool') as ToolId | null;
+    if (saved && TOOLS.some((t) => t.id === saved)) return saved;
+    return 'image';
+  });
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const [scrollProgress, setScrollProgress] = useState(0);
+  const [isScrolled, setIsScrolled] = useState(false);
 
-  const startResizing = (e: React.MouseEvent) => {
-    isResizing.current = true;
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', stopResizing);
-    document.body.style.cursor = 'col-resize';
+  const mainScrollRef = useRef<HTMLElement>(null);
+  const rootContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    localStorage.setItem('monolith_active_tool', activeTool);
+    // Smooth scroll back to top when switching tools
+    if (mainScrollRef.current) {
+      mainScrollRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [activeTool]);
+
+  // Scroll & Parallax CSS Variable Driver + IntersectionObserver Scroll Animations
+  useEffect(() => {
+    const el = mainScrollRef.current;
+    if (!el) return;
+
+    const updateScrollVars = () => {
+      const st = el.scrollTop;
+      const maxScroll = Math.max(1, el.scrollHeight - el.clientHeight);
+      setIsScrolled(st > 10);
+      setScrollProgress(Math.min(100, (st / maxScroll) * 100));
+      rootContainerRef.current?.style.setProperty('--scroll-y', `${st}px`);
+    };
+
+    el.addEventListener('scroll', updateScrollVars, { passive: true });
+    updateScrollVars();
+
+    // IntersectionObserver for smooth scroll-in animations of panels
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('is-visible');
+          }
+        });
+      },
+      { root: el, threshold: 0.06 }
+    );
+
+    const timer = setTimeout(() => {
+      const panels = el.querySelectorAll('.studio-panel');
+      panels.forEach((p) => {
+        p.classList.add('scroll-reveal-item');
+        observer.observe(p);
+      });
+    }, 40);
+
+    return () => {
+      el.removeEventListener('scroll', updateScrollVars);
+      clearTimeout(timer);
+      observer.disconnect();
+    };
+  }, [activeTool]);
+
+  const handlePointerMove = (e: React.MouseEvent) => {
+    if (!rootContainerRef.current) return;
+    const x = ((e.clientX / window.innerWidth) - 0.5) * -14;
+    const y = ((e.clientY / window.innerHeight) - 0.5) * -14;
+    rootContainerRef.current.style.setProperty('--parallax-x', `${x.toFixed(1)}px`);
+    rootContainerRef.current.style.setProperty('--parallax-y', `${y.toFixed(1)}px`);
   };
 
-  const handleMouseMove = (e: MouseEvent) => {
-    if (!isResizing.current) return;
-    const newWidth = Math.max(220, Math.min(450, e.clientX));
-    setSidebarWidth(newWidth);
-  };
-
-  const stopResizing = () => {
-    isResizing.current = false;
-    document.removeEventListener('mousemove', handleMouseMove);
-    document.removeEventListener('mouseup', stopResizing);
-    document.body.style.cursor = 'default';
-  };
+  const currentTool = useMemo(
+    () => TOOLS.find((t) => t.id === activeTool) || TOOLS[0],
+    [activeTool]
+  );
 
   const renderTool = () => {
     switch (activeTool) {
-      case 'home': return <Home onSelectTool={setActiveTool} />;
-      case 'image': return <ImageStudio />;
-      case 'paint-pro': return <PaintPro />;
-      case 'compress': return <ImageCompressor />;
-      case 'metadata': return <MetadataEditor />;
-      case 'units': return <UnitConverter />;
-      case 'color': return <ColorConverter />;
-      case 'gradient': return <GradientDesigner />;
-      case 'audio': return <AudioLab />;
-      case 'audio-mixer': return <AudioMixer />;
-      case 'blender': return <BlenderHelper />;
-      case 'zip': return <ZipExpander />;
-      case 'key': return <KeyVisualizer />;
-      case 'tts': return <TTSStudio />;
-      case 'qr': return <QRGenerator />;
-      case 'password': return <PasswordGenerator />;
-      case 'json': return <JSONFormatter />;
-      case 'binary': return <BinaryConverter />;
-      case 'cipher': return <CipherTool />;
-      case 'lorem': return <LoremGenerator />;
-      case 'hardware': return <HardwareLab />;
-      case 'office-editor': return <OfficeEditor />;
-      case 'office-converter': return <OfficeConverter />;
-      default: return <Home onSelectTool={setActiveTool} />;
+      case 'image':
+        return <ImageStudio />;
+      case 'video':
+        return <VideoEditor />;
+      case 'paint-pro':
+        return <PaintPro />;
+      case 'compress':
+        return <ImageCompressor />;
+      case 'audio-mixer':
+        return <AudioMixer />;
+      case 'office-editor':
+        return <OfficeEditor />;
+      case 'office-converter':
+        return <OfficeConverter />;
+      case 'binary':
+        return <BinaryConverter />;
+      case 'key':
+        return <KeyVisualizer />;
+      case 'audio':
+        return <AudioLab />;
+      case 'spectrogram':
+        return <SpectrogramLab />;
+      case 'qr':
+        return <QRGenerator />;
+      case 'metadata':
+        return <MetadataEditor />;
+      case 'units':
+        return <UnitConverter />;
+      default:
+        return <ImageStudio />;
     }
   };
 
-  const isDashboardMode = activeTool !== 'home';
-
   return (
-    <div className="h-screen w-screen flex flex-col bg-black overflow-hidden relative">
-      <Background3D />
-      
-      {!isDashboardMode ? (
-        <div className="flex flex-col h-full relative z-10 overflow-y-auto custom-scrollbar overflow-x-hidden">
-          <Navbar activeTool={activeTool} onSelectTool={setActiveTool} />
-          <main className="flex-1 p-4 md:p-12 flex items-start justify-center">
-            <div className="max-w-7xl w-full">
-              {renderTool()}
-            </div>
-          </main>
-        </div>
-      ) : (
-        <div className="flex flex-1 h-full relative z-10 overflow-hidden">
-          {/* Mobile Overlay */}
-          {isSidebarOpen && (
-            <div 
-              className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[45] lg:hidden"
-              onClick={() => setIsSidebarOpen(false)}
-            />
-          )}
+    <div
+      ref={rootContainerRef}
+      onMouseMove={handlePointerMove}
+      className="h-screen w-screen flex flex-col lg:flex-row bg-[#060608] text-zinc-100 overflow-hidden relative"
+    >
+      {/* Subtle Parallax Architectural Grid Background */}
+      <div className="fixed inset-[-60px] pointer-events-none parallax-backdrop z-0" />
 
-          <div 
-            className={`fixed inset-y-0 left-0 lg:relative z-50 h-full bg-black/40 border-r border-white/5 transition-transform lg:transition-none duration-300 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
-            style={{ width: isSidebarOpen ? '85%' : `${sidebarWidth}px`, maxWidth: isSidebarOpen ? '320px' : 'none' }}
-          >
-            <div className="h-full overflow-y-auto custom-scrollbar">
-               <Sidebar 
-                activeTool={activeTool} 
-                onSelectTool={(id) => {
-                  setActiveTool(id);
-                  setIsSidebarOpen(false);
-                }} 
-              />
-            </div>
-            <div 
-              onMouseDown={startResizing}
-              className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-purple-500/50 transition-colors z-50 hidden lg:block"
-            />
-          </div>
-
-          <div className="flex-1 h-full flex flex-col overflow-hidden">
-            <header className="h-16 md:h-20 flex-shrink-0 flex justify-between items-center bg-black/60 backdrop-blur-3xl px-4 md:px-8 border-b border-white/5 z-40">
-                <div className="flex items-center gap-4 md:gap-6">
-                  <button 
-                    onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                    className="lg:hidden w-10 h-10 bg-white/5 border border-white/10 rounded-xl flex items-center justify-center text-white active:scale-90 transition-transform"
-                  >
-                    <i className="fas fa-bars"></i>
-                  </button>
-                  <button 
-                    onClick={() => setActiveTool('home')}
-                    className="text-[9px] md:text-[10px] font-black text-slate-500 hover:text-white transition-all uppercase tracking-[0.2em] md:tracking-[0.4em] flex items-center gap-2 group"
-                  >
-                    <i className="fas fa-arrow-left group-hover:-translate-x-1 transition-transform"></i> Home
-                  </button>
-                </div>
-                <div className="text-[8px] md:text-[10px] text-slate-800 font-mono tracking-[0.2em] md:tracking-[0.5em] uppercase hidden sm:block italic font-black">
-                  ONYX_CORE // STABLE_ENV_V4.4
-                </div>
-            </header>
-
-            <main className="flex-1 overflow-y-auto overflow-x-hidden p-4 md:p-12 custom-scrollbar bg-black/30">
-              <div className="max-w-6xl mx-auto w-full min-h-full pb-32">
-                {renderTool()}
-              </div>
-            </main>
-          </div>
-        </div>
+      {/* Mobile Drawer Backdrop */}
+      {isMobileSidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/75 backdrop-blur-xs z-40 lg:hidden transition-opacity duration-200"
+          onClick={() => setIsMobileSidebarOpen(false)}
+        />
       )}
+
+      {/* Expanded Larger Sidebar (288px / w-72 on Desktop) */}
+      <div
+        className={`fixed inset-y-0 left-0 z-50 lg:relative h-full w-72 transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] flex-shrink-0 ${
+          isMobileSidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+        }`}
+      >
+        <Sidebar
+          activeTool={activeTool}
+          onSelectTool={(id) => {
+            setActiveTool(id);
+            setIsMobileSidebarOpen(false);
+          }}
+          onCloseMobile={() => setIsMobileSidebarOpen(false)}
+        />
+      </div>
+
+      {/* Main Content Area */}
+      <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden relative z-10">
+        {/* Scroll-Reactive Mobile & Tablet Header */}
+        <header
+          className={`lg:hidden h-14 flex-shrink-0 px-4 flex items-center justify-between transition-all duration-200 z-30 ${
+            isScrolled
+              ? 'bg-[#0a0a0d]/90 backdrop-blur-md border-b border-zinc-800 shadow-lg'
+              : 'bg-[#0a0a0d]/60 border-b border-zinc-800/50'
+          }`}
+        >
+          <button
+            onClick={() => setIsMobileSidebarOpen(true)}
+            className="w-9 h-9 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-200 active:scale-95"
+            aria-label="Menu"
+          >
+            <i className="fas fa-bars text-xs"></i>
+          </button>
+          <div className="flex items-center gap-2">
+            <i className={`fas ${currentTool.icon} text-xs text-zinc-400`}></i>
+            <span className="text-xs font-semibold tracking-wide text-white">{currentTool.name}</span>
+          </div>
+          <div className="w-9" />
+        </header>
+
+        {/* Subtle Top Scroll Progress Line */}
+        {isScrolled && (
+          <div className="h-[1px] w-full bg-zinc-900 flex-shrink-0 overflow-hidden">
+            <div
+              style={{ width: `${scrollProgress}%` }}
+              className="h-full bg-white/40 transition-all duration-100"
+            />
+          </div>
+        )}
+
+        {/* Main Scroll Container with Keyed Tab-Switch Animation */}
+        <main
+          ref={mainScrollRef}
+          className="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-8 custom-scrollbar"
+        >
+          <div
+            key={activeTool}
+            className="max-w-6xl mx-auto w-full pb-20 lg:pb-10 tool-view-transition"
+          >
+            <Suspense
+              fallback={
+                <div className="h-56 flex items-center justify-center font-mono text-xs text-zinc-500">
+                  Loading...
+                </div>
+              }
+            >
+              {renderTool()}
+            </Suspense>
+          </div>
+        </main>
+
+        {/* Mobile Floating Bottom Navigation Dock */}
+        <div className="lg:hidden h-14 bg-[#0a0a0d]/95 backdrop-blur-xl border-t border-zinc-800/80 flex items-center overflow-x-auto no-scrollbar px-3 gap-1.5 flex-shrink-0">
+          {TOOLS.map((tool) => {
+            const active = activeTool === tool.id;
+            return (
+              <button
+                key={tool.id}
+                onClick={() => setActiveTool(tool.id)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap flex-shrink-0 transition-all duration-200 ${
+                  active
+                    ? 'bg-white text-black font-semibold shadow-sm scale-[1.02]'
+                    : 'text-zinc-400 bg-zinc-900/60 border border-zinc-800/60'
+                }`}
+              >
+                <i className={`fas ${tool.icon} text-[10px]`}></i>
+                <span>{tool.shortName}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 };
